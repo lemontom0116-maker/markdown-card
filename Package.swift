@@ -3,13 +3,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "EasyCard",
+    name: "MarkdownCard",
     platforms: [
         .macOS(.v14),
     ],
     products: [
         .library(name: "MarkdownCardCore", targets: ["MarkdownCardCore"]),
-        .executable(name: "EasyCard", targets: ["MarkdownCardAgent"]),
+        .executable(name: "MarkdownCard", targets: ["MarkdownCardAgent"]),
         .executable(name: "mdcard", targets: ["mdcard"]),
     ],
     dependencies: [

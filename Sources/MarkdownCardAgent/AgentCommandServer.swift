@@ -50,7 +50,7 @@ final class AgentCommandServer: @unchecked Sendable {
                 if !stateLock.withLock({ running }) {
                     return
                 }
-                fputs("Easy Card IPC accept failed: \(error.localizedDescription)\n", stderr)
+                fputs("Markdown Card IPC accept failed: \(error.localizedDescription)\n", stderr)
             }
         }
     }
@@ -127,7 +127,7 @@ final class AgentCommandServer: @unchecked Sendable {
             do {
                 try connection.sendResponse(response)
             } catch {
-                fputs("Easy Card IPC response failed: \(error.localizedDescription)\n", stderr)
+                fputs("Markdown Card IPC response failed: \(error.localizedDescription)\n", stderr)
             }
             connection.close()
         }
@@ -145,7 +145,7 @@ final class AgentCommandServer: @unchecked Sendable {
                 .failure(requestID: requestID, code: code, message: message)
             )
         } catch {
-            fputs("Easy Card IPC error response failed: \(error.localizedDescription)\n", stderr)
+            fputs("Markdown Card IPC error response failed: \(error.localizedDescription)\n", stderr)
         }
     }
 

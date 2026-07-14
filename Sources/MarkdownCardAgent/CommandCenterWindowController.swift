@@ -124,7 +124,7 @@ final class CommandCenterWindowController: NSWindowController, NSTableViewDataSo
         .init(id: .newCard, title: "New Card", keywords: ["create", "note", "new"], symbol: "plus.circle"),
         .init(id: .cardLibrary, title: "Card Library", keywords: ["library", "cards", "browse"], symbol: "rectangle.split.2x1"),
         .init(id: .settings, title: "Settings", keywords: ["preferences", "appearance", "shortcuts", "cli"], symbol: "gearshape"),
-        .init(id: .quit, title: "Quit Easy Card", keywords: ["quit", "exit"], symbol: "power"),
+        .init(id: .quit, title: "Quit Markdown Card", keywords: ["quit", "exit"], symbol: "power"),
     ]
 
     init(appearanceController: AppearanceController, defaults: UserDefaults = .standard) {
@@ -356,7 +356,7 @@ final class CommandCenterWindowController: NSWindowController, NSTableViewDataSo
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
         panel.animationBehavior = .none
-        panel.setAccessibilityLabel("Easy Card Command Center")
+        panel.setAccessibilityLabel("Markdown Card Command Center")
         panel.onMoveSelection = { [weak self] delta in self?.moveSelection(by: delta) }
         panel.onConfirm = { [weak self] in self?.executeSelection() }
         panel.onCancel = { [weak self] in self?.close(animated: true) }

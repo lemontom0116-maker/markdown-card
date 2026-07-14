@@ -1,6 +1,6 @@
 # Markdown Syntax Showcase
 
-This card exercises the Markdown, GFM, KaTeX, and renderer-plugin features supported by Easy Card. This deliberately long sentence wraps naturally inside a narrow Sticky Note so automatic wrapping can be compared with the following paragraph.
+This card exercises the Markdown, GFM, KaTeX, and renderer-plugin features supported by Markdown Card. This deliberately long sentence wraps naturally inside a narrow Sticky Note so automatic wrapping can be compared with the following paragraph.
 
 This paragraph starts after Enter and should use exactly the same baseline spacing as the wrapped line above.\
 This line uses a Markdown hard break and should keep the same body line height too.
@@ -11,7 +11,7 @@ This line uses a Markdown hard break and should keep the same body line height t
 
 ### Blockquote
 
-> Easy Card keeps quotes in the same continuous canvas.
+> Markdown Card keeps quotes in the same continuous canvas.
 >
 > > Nested quotes remain editable and serialize back to Markdown.
 

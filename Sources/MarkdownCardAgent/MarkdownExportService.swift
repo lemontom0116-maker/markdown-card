@@ -23,7 +23,7 @@ enum MarkdownExportError: LocalizedError, Equatable {
         case let .missingAttachment(identifier):
             "The attachment \(identifier).png is missing or invalid."
         case .unableToWrite:
-            "Easy Card could not write the Markdown export."
+            "Markdown Card could not write the Markdown export."
         }
     }
 }

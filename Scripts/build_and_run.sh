@@ -4,9 +4,9 @@ set -euo pipefail
 MODE="${1:-run}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
-APP_NAME="Easy Card"
-EXECUTABLE_NAME="EasyCard"
-LEGACY_EXECUTABLE_NAME="MarkdownCard"
+APP_NAME="Markdown Card"
+EXECUTABLE_NAME="MarkdownCard"
+LEGACY_EXECUTABLE_NAME="EasyCard"
 BUNDLE_ID="com.garden100.MarkdownCard"
 APP_BUNDLE="$DIST/$APP_NAME.app"
 CONTENTS="$APP_BUNDLE/Contents"
@@ -35,7 +35,7 @@ assemble_bundle() {
   local bin_dir
   bin_dir="$(swift build --package-path "$ROOT" -c release --show-bin-path)"
 
-  rm -rf "$APP_BUNDLE" "$DIST/Markdown Card.app"
+  rm -rf "$APP_BUNDLE" "$DIST/Easy Card.app"
   mkdir -p "$MACOS" "$HELPERS" "$RESOURCES/Renderer"
   cp "$bin_dir/$EXECUTABLE_NAME" "$MACOS/$EXECUTABLE_NAME"
   cp "$bin_dir/mdcard" "$HELPERS/mdcard"
@@ -77,16 +77,16 @@ stop_running_app() {
     || pgrep -x "$LEGACY_EXECUTABLE_NAME" >/dev/null 2>&1; then
     local control_cli="$HELPERS/mdcard"
     if [ ! -x "$control_cli" ] \
-      && [ -x "$DIST/Markdown Card.app/Contents/Helpers/mdcard" ]; then
-      control_cli="$DIST/Markdown Card.app/Contents/Helpers/mdcard"
+      && [ -x "$DIST/Easy Card.app/Contents/Helpers/mdcard" ]; then
+      control_cli="$DIST/Easy Card.app/Contents/Helpers/mdcard"
     fi
     if [ ! -x "$control_cli" ]; then
-      echo "An Easy Card process is running, but its bundled CLI is unavailable." >&2
+      echo "A Markdown Card process is running, but its bundled CLI is unavailable." >&2
       echo "Quit it from Command Center or with mdcard quit, then run this command again." >&2
       exit 1
     fi
     if ! "$control_cli" quit >/dev/null 2>&1; then
-      echo "Easy Card is running but did not accept a graceful quit." >&2
+      echo "Markdown Card is running but did not accept a graceful quit." >&2
       echo "Quit it from Command Center or with mdcard quit, then run this command again." >&2
       exit 1
     fi
@@ -99,7 +99,7 @@ stop_running_app() {
     done
     if pgrep -x "$EXECUTABLE_NAME" >/dev/null 2>&1 \
       || pgrep -x "$LEGACY_EXECUTABLE_NAME" >/dev/null 2>&1; then
-      echo "Easy Card did not finish its persistence flush within four seconds." >&2
+      echo "Markdown Card did not finish its persistence flush within four seconds." >&2
       exit 1
     fi
   fi

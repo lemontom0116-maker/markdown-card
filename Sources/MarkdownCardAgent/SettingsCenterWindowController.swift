@@ -48,7 +48,7 @@ final class SettingsCenterWindowController: NSWindowController, NSTableViewDataS
     private let loginSwitch = NSSwitch()
     private let cliStatusLabel = NSTextField(wrappingLabelWithString: "")
     private let agentNoteLabel = NSTextField(
-        wrappingLabelWithString: "Easy Card runs quietly in the background until you open it."
+        wrappingLabelWithString: "Markdown Card runs quietly in the background until you open it."
     )
     private let cliButton = NSButton(title: "Install", target: nil, action: nil)
     private let commandCenterRecorder = ShortcutRecorderButton(name: .commandCenter)
@@ -203,7 +203,7 @@ final class SettingsCenterWindowController: NSWindowController, NSTableViewDataS
 
     private func configureWindow(_ window: NSWindow) {
         window.delegate = self
-        window.title = "Easy Card Settings"
+        window.title = "Markdown Card Settings"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
@@ -322,8 +322,8 @@ final class SettingsCenterWindowController: NSWindowController, NSTableViewDataS
         let rows: [(String, String, ShortcutRecorderButton)] = [
             ("Open Command Center", "Global", commandCenterRecorder),
             ("New Card", "Global", newCardRecorder),
-            ("Card Library", "While Easy Card is active", libraryRecorder),
-            ("Settings", "While Easy Card is active", settingsRecorder),
+            ("Card Library", "While Markdown Card is active", libraryRecorder),
+            ("Settings", "While Markdown Card is active", settingsRecorder),
         ]
         [title, note].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false

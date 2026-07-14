@@ -1,9 +1,9 @@
 {
-  "name": "easy-card-renderer",
+  "name": "markdown-card-renderer",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Offline Markdown, code, and math renderer for Easy Card.",
+  "description": "Offline Markdown, code, and math renderer for Markdown Card.",
   "scripts": {
     "build": "node esbuild.mjs",
     "dev": "vite --config vite.config.mjs",

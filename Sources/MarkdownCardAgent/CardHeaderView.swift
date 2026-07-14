@@ -10,6 +10,9 @@ final class CardHeaderView: NSView, AppearanceConsumer {
     var onShowLayoutMenu: ((NSView) -> Void)?
     var onCopyMarkdown: (() -> Void)?
     var onExportMarkdown: (() -> Void)?
+    var windowDragHandler: (NSWindow, NSEvent) -> Void = { window, event in
+        window.performDrag(with: event)
+    }
 
     private let closeButton = CloseDotButton()
     private let titleLabel = DraggableTitleLabel(string: CardRecord.untitledTitle)
@@ -36,28 +39,16 @@ final class CardHeaderView: NSView, AppearanceConsumer {
     private var layoutToTrailingConstraint: NSLayoutConstraint?
     private var exportWidthConstraint: NSLayoutConstraint?
     private var copyToExportConstraint: NSLayoutConstraint?
-    private var dragStartMouseLocation: NSPoint?
-    private var dragStartWindowOrigin: NSPoint?
-
     var layoutAnchor: NSView { layoutButton }
 
-    // This view handles dragging explicitly. Keep the window from consuming
-    // the gesture so `mouseDragged(with:)` continues to reach this view on a
-    // borderless panel.
+    // Forward the gesture to AppKit so the Window Server handles display and
+    // Space transitions for this borderless panel.
     override var mouseDownCanMoveWindow: Bool { false }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
-        beginWindowDrag()
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        continueWindowDrag()
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        endWindowDrag()
+        performWindowDrag(with: event)
     }
 
     override init(frame frameRect: NSRect) {
@@ -156,30 +147,9 @@ final class CardHeaderView: NSView, AppearanceConsumer {
         ])
     }
 
-    fileprivate func beginWindowDrag() {
+    fileprivate func performWindowDrag(with event: NSEvent) {
         guard let window else { return }
-        dragStartMouseLocation = NSEvent.mouseLocation
-        dragStartWindowOrigin = window.frame.origin
-    }
-
-    fileprivate func continueWindowDrag() {
-        guard
-            let window,
-            let dragStartMouseLocation,
-            let dragStartWindowOrigin
-        else {
-            return
-        }
-        let currentMouseLocation = NSEvent.mouseLocation
-        window.setFrameOrigin(NSPoint(
-            x: dragStartWindowOrigin.x + currentMouseLocation.x - dragStartMouseLocation.x,
-            y: dragStartWindowOrigin.y + currentMouseLocation.y - dragStartMouseLocation.y
-        ))
-    }
-
-    fileprivate func endWindowDrag() {
-        dragStartMouseLocation = nil
-        dragStartWindowOrigin = nil
+        windowDragHandler(window, event)
     }
 
     func update(title: String) {
@@ -405,15 +375,7 @@ private final class DraggableTitleLabel: NSTextField {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
-        dragOwner?.beginWindowDrag()
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        dragOwner?.continueWindowDrag()
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        dragOwner?.endWindowDrag()
+        dragOwner?.performWindowDrag(with: event)
     }
 }
 

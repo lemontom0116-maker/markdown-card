@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP="$ROOT/dist/Easy Card.app"
-AGENT="$APP/Contents/MacOS/EasyCard"
+APP="$ROOT/dist/Markdown Card.app"
+AGENT="$APP/Contents/MacOS/MarkdownCard"
 CLI="$APP/Contents/Helpers/mdcard"
 RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/markdown-card-integration.XXXXXX")"
 SOCKET="$RUN_ROOT/agent.sock"
@@ -104,4 +104,4 @@ run_cli quit | grep -qx 'ok'
 wait "$AGENT_PID"
 AGENT_PID=""
 
-echo "Easy Card CLI integration: passed"
+echo "Markdown Card CLI integration: passed"

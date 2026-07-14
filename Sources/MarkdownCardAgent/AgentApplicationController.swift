@@ -222,10 +222,10 @@ final class AgentApplicationController: NSObject, AppearanceConsumer {
     private func configureMainMenu() {
         let main = NSMenu()
         let appItem = NSMenuItem()
-        let appMenu = NSMenu(title: "Easy Card")
+        let appMenu = NSMenu(title: "Markdown Card")
         appMenu.addItem(menuItem("Settings…", action: #selector(showSettings(_:))))
         appMenu.addItem(.separator())
-        appMenu.addItem(menuItem("Quit Easy Card", action: #selector(quit(_:)), key: "q"))
+        appMenu.addItem(menuItem("Quit Markdown Card", action: #selector(quit(_:)), key: "q"))
         appItem.submenu = appMenu
         main.addItem(appItem)
 
@@ -361,10 +361,24 @@ final class AgentApplicationController: NSObject, AppearanceConsumer {
         cards[id] = card
         _ = try await repository.upsert(card)
         let panel = panelController(for: card)
-        panel.show(on: currentScreen(), centerIfNeeded: card.windowFrame == nil)
+        let shouldCenter = card.windowFrame == nil
+        panel.show(
+            on: Self.presentationScreen(
+                for: card,
+                currentScreen: currentScreen()
+            ),
+            centerIfNeeded: shouldCenter
+        )
         markCardActive(id)
         refreshAuxiliarySnapshots()
         return card
+    }
+
+    static func presentationScreen(
+        for card: CardRecord,
+        currentScreen: NSScreen?
+    ) -> NSScreen? {
+        card.windowFrame == nil ? currentScreen : nil
     }
 
     private func hideCard(id: UUID) async throws {
@@ -519,7 +533,7 @@ final class AgentApplicationController: NSObject, AppearanceConsumer {
                 _ = try await repository.upsert(card)
             } catch {
                 await persistenceErrorState.record(error.localizedDescription)
-                fputs("Easy Card autosave failed: \(error.localizedDescription)\n", stderr)
+                fputs("Markdown Card autosave failed: \(error.localizedDescription)\n", stderr)
             }
         }
     }
@@ -801,7 +815,7 @@ private enum AgentUIError: LocalizedError {
         case let .cardNotFound(id): "Card \(id.uuidString) was not found."
         case .protectedCard: "Use --force to delete a visible card."
         case .cliNotBundled: "The mdcard helper is not present in this application bundle."
-        case let .persistenceFailed(message): "Easy Card could not save the latest changes: \(message)"
+        case let .persistenceFailed(message): "Markdown Card could not save the latest changes: \(message)"
         }
     }
 }

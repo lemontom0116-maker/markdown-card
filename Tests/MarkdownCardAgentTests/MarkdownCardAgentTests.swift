@@ -300,14 +300,39 @@ final class CardPanelStateTests: XCTestCase {
         let header = try XCTUnwrap(root.subviews.first as? CardHeaderView)
         let title = try XCTUnwrap(header.subviews.compactMap { $0 as? NSTextField }.first)
         let buttons = header.subviews.compactMap { $0 as? NSButton }
+        let closeButton = try XCTUnwrap(buttons.first { $0.toolTip == "Hide Card (Esc)" })
+        let layoutButton = try XCTUnwrap(buttons.first { $0.toolTip == "Card Layout" })
         let copyButton = try XCTUnwrap(buttons.first { $0.toolTip == "Copy Markdown" })
         let exportButton = try XCTUnwrap(
             buttons.first { $0.toolTip == "Export Markdown with Attachments" }
         )
+        var closeCount = 0
+        var layoutCount = 0
         var copyCount = 0
         var exportCount = 0
+        var dragCalls: [(NSWindow, NSEvent)] = []
+        header.windowDragHandler = { window, event in
+            dragCalls.append((window, event))
+        }
+        header.onClose = { closeCount += 1 }
+        header.onShowLayoutMenu = { _ in layoutCount += 1 }
         header.onCopyMarkdown = { copyCount += 1 }
         header.onExportMarkdown = { exportCount += 1 }
+
+        let window = try XCTUnwrap(controller.window)
+        let mouseDown = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: NSPoint(x: header.bounds.midX, y: header.bounds.midY),
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 7,
+                clickCount: 1,
+                pressure: 1
+            )
+        )
 
         XCTAssertFalse(header.mouseDownCanMoveWindow)
         XCTAssertTrue(header.acceptsFirstMouse(for: nil))
@@ -315,8 +340,19 @@ final class CardPanelStateTests: XCTestCase {
         XCTAssertTrue(title.acceptsFirstMouse(for: nil))
         XCTAssertFalse(buttons.isEmpty)
         XCTAssertTrue(buttons.allSatisfy { !$0.mouseDownCanMoveWindow })
+        header.mouseDown(with: mouseDown)
+        title.mouseDown(with: mouseDown)
+        XCTAssertEqual(dragCalls.count, 2)
+        XCTAssertTrue(dragCalls.allSatisfy { $0.0 === window })
+        XCTAssertTrue(dragCalls.allSatisfy { $0.1.eventNumber == mouseDown.eventNumber })
+
+        closeButton.performClick(nil)
+        layoutButton.performClick(nil)
         copyButton.performClick(nil)
+        XCTAssertEqual(closeCount, 1)
+        XCTAssertEqual(layoutCount, 1)
         XCTAssertEqual(copyCount, 1)
+        XCTAssertEqual(dragCalls.count, 2)
         XCTAssertTrue(exportButton.isHidden)
         header.setManagedAttachmentsPresent(true, animated: false)
         XCTAssertFalse(exportButton.isHidden)
@@ -325,6 +361,69 @@ final class CardPanelStateTests: XCTestCase {
         XCTAssertEqual(exportCount, 1)
         header.setMiniMode(true)
         XCTAssertTrue(exportButton.isHidden)
+    }
+
+    func testWindowDidChangeScreenPreservesFrameLayoutAndPersistsScreenIdentity() throws {
+        let screen = try XCTUnwrap(NSScreen.main)
+        let suiteName = "MarkdownCardAgentTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let controller = CardPanelController(
+            card: CardRecord(markdown: "# Across displays", layoutMode: .sticky),
+            appearanceController: AppearanceController(defaults: defaults)
+        )
+        let window = try XCTUnwrap(controller.window)
+        let initialFrame = NSRect(
+            x: screen.visibleFrame.midX - 180,
+            y: screen.visibleFrame.midY - 150,
+            width: 360,
+            height: 300
+        )
+        window.setFrame(initialFrame, display: false)
+        let frameBeforeScreenChange = window.frame
+        let initialLayout = controller.card.layoutMode
+        var savedFrame: WindowFrame?
+        var savedScreenID: String?
+        controller.onFrameChange = { _, frame, screenID in
+            savedFrame = frame
+            savedScreenID = screenID
+        }
+
+        controller.windowDidChangeScreen(
+            Notification(name: NSWindow.didChangeScreenNotification, object: window)
+        )
+        controller.flushPendingChanges()
+
+        XCTAssertEqual(window.frame, frameBeforeScreenChange)
+        XCTAssertEqual(controller.card.layoutMode, initialLayout)
+        XCTAssertEqual(savedFrame?.x, frameBeforeScreenChange.origin.x)
+        XCTAssertEqual(savedFrame?.y, frameBeforeScreenChange.origin.y)
+        XCTAssertEqual(savedFrame?.width, frameBeforeScreenChange.width)
+        XCTAssertEqual(savedFrame?.height, frameBeforeScreenChange.height)
+        XCTAssertEqual(savedScreenID, window.screen?.localizedName)
+    }
+
+    func testPresentationScreenUsesCurrentScreenOnlyForCardsWithoutStoredFrame() throws {
+        let screen = try XCTUnwrap(NSScreen.main)
+        let newCard = CardRecord(markdown: "New")
+        let restoredCard = CardRecord(
+            markdown: "Restored",
+            windowFrame: WindowFrame(x: 100, y: 100, width: 360, height: 300),
+            screenID: screen.localizedName
+        )
+
+        XCTAssertTrue(
+            AgentApplicationController.presentationScreen(
+                for: newCard,
+                currentScreen: screen
+            ) === screen
+        )
+        XCTAssertNil(
+            AgentApplicationController.presentationScreen(
+                for: restoredCard,
+                currentScreen: screen
+            )
+        )
     }
 
     func testMarkdownExportWritesRelativeBundleAndPreservesUnrelatedAttachments() throws {
@@ -992,7 +1091,7 @@ final class CommandCenterAndDocumentSyncTests: XCTestCase {
             [
                 "[Recent]", "Newer", "Older", "New Card",
                 "[Cards]", "Newer", "Older",
-                "[Commands]", "New Card", "Card Library", "Settings", "Quit Easy Card",
+                "[Commands]", "New Card", "Card Library", "Settings", "Quit Markdown Card",
             ]
         )
         XCTAssertTrue(controller.isResultScrollingEnabledForTesting())

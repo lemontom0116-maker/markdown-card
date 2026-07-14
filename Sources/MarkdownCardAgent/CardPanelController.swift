@@ -315,6 +315,12 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
 
     func windowDidMove(_ notification: Notification) { scheduleFrameSave() }
 
+    func windowDidChangeScreen(_ notification: Notification) {
+        updateWindowSizingLimits()
+        synchronizeWindowSurface()
+        scheduleFrameSave()
+    }
+
     func windowDidResize(_ notification: Notification) {
         synchronizeContentViewFrame()
         synchronizeWindowSurface()
@@ -383,7 +389,7 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         panel.isMovableByWindowBackground = false
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
-        panel.setAccessibilityLabel(card.title.isEmpty ? "Easy Card" : card.title)
+        panel.setAccessibilityLabel(card.title.isEmpty ? "Markdown Card" : card.title)
 
         panel.onHide = { [weak self] in self?.requestHide() }
         panel.onCreateCard = { [weak self] in self?.onCreateCard?() }
@@ -468,7 +474,7 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
 
     private func updateHeader() {
         headerView.update(title: card.title)
-        window?.setAccessibilityLabel(card.title.isEmpty ? "Easy Card" : card.title)
+        window?.setAccessibilityLabel(card.title.isEmpty ? "Markdown Card" : card.title)
     }
 
     private func updateLayoutPresentation() {

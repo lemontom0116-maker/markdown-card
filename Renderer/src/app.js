@@ -94,7 +94,7 @@ function clampSelection(editor, selection) {
 
 export function installMarkdownCard(window, document) {
   const renderer = document.getElementById("renderer");
-  if (!renderer) throw new Error("Easy Card renderer root is missing");
+  if (!renderer) throw new Error("Markdown Card renderer root is missing");
 
   const systemQuery = window.matchMedia?.("(prefers-color-scheme: dark)");
   let requestedAppearance = VALID_APPEARANCES.has(document.documentElement.dataset.theme)

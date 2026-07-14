@@ -8,7 +8,7 @@ struct MDCardCLI: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mdcard",
         abstract: "Show and control native Markdown cards.",
-        version: "0.1.0",
+        version: "0.1.1",
         subcommands: [
             Create.self,
             Show.self,
@@ -195,7 +195,7 @@ private struct Theme: ParsableCommand {
 
 private struct Quit: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Terminate the Easy Card agent."
+        abstract: "Terminate the Markdown Card agent."
     )
 
     func run() throws {
@@ -278,7 +278,7 @@ private enum AgentBridge {
         } while Date() < deadline
 
         throw ValidationError(
-            "Easy Card did not start within 2 seconds: \(lastError?.localizedDescription ?? "unknown error")"
+            "Markdown Card did not start within 2 seconds: \(lastError?.localizedDescription ?? "unknown error")"
         )
     }
 
@@ -302,11 +302,11 @@ private enum AgentBridge {
             try process.run()
             process.waitUntilExit()
         } catch {
-            throw ValidationError("Unable to launch Easy Card: \(error.localizedDescription)")
+            throw ValidationError("Unable to launch Markdown Card: \(error.localizedDescription)")
         }
         guard process.terminationStatus == 0 else {
             throw ValidationError(
-                "Unable to locate the Easy Card app (bundle ID \(bundleIdentifier))."
+                "Unable to locate the Markdown Card app (bundle ID \(bundleIdentifier))."
             )
         }
     }

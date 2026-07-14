@@ -1,76 +1,85 @@
 <p align="center">
-  <img src="Resources/AppIcon.png" width="160" alt="Easy Card app icon">
+  <img src="Resources/AppIcon.png" width="160" alt="Markdown Card app icon for macOS">
 </p>
 
-<h1 align="center">Easy Card</h1>
+<h1 align="center">Markdown Card — Native Floating Markdown Notes for macOS</h1>
 
 <p align="center">
-  Beautiful, always-available Markdown cards for macOS.
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-black.svg"></a>
+  <img alt="macOS 14 or later" src="https://img.shields.io/badge/macOS-14%2B-black.svg">
+  <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6-black.svg">
 </p>
 
-Easy Card is a native macOS agent app that turns Markdown into lightweight
-desktop cards. Press a global shortcut, write in a continuous rich-text canvas,
-and keep notes above your other windows without a menu-bar item or permanent
-Dock icon.
+Markdown Card is an open-source native macOS app for floating Markdown notes
+and desktop cards. It combines a continuous WYSIWYG editor with global
+shortcuts, LaTeX, managed attachments, and CLI automation, while remaining a
+quiet offline-first agent without a permanent Dock or menu-bar icon.
 
-> Easy Card 0.1.0 requires macOS 14 or later. The downloadable build is ad-hoc
-> signed but not yet notarized with an Apple Developer ID.
+> Version 0.1.1 requires macOS 14 or later and Apple Silicon. The downloadable
+> app is ad-hoc signed, but is not yet notarized with an Apple Developer ID.
 
 ## Features
 
-- **Native macOS agent** — quiet `LSUIElement` app with AppKit panels, SwiftData
-  persistence, global shortcuts, and System/Light/Dark appearance.
-- **Continuous Markdown editing** — Raycast Notes-style WYSIWYG canvas powered
-  by Tiptap/ProseMirror. Markdown remains the stored and copied format.
-- **Rich syntax** — headings, emphasis, links, quotes, GFM tables, nested lists,
-  tasks, fenced code with VS Code-style highlighting, inline code, and KaTeX.
-- **Always-on-top cards** — every card floats across applications and Spaces.
-- **Five layouts** — Mini, Sticky Note, Middle Note, Full Screen, and Custom;
-  non-fullscreen layouts grow with their content inside safe limits.
-- **Command Center** — press `⌥Space` to search cards and run commands without
-  opening a conventional app window.
-- **Card Library** — search and edit every card from a native split-view window.
-- **Images and export** — paste clipboard images as managed attachments, copy
-  Markdown for local apps, or export `Card.md + attachments/` for VS Code and
-  repositories.
-- **YouTube covers** — paste a standalone YouTube URL or use `/youtube` to add a
-  clickable 16:9 video cover.
-- **CLI automation** — `mdcard` talks to the single running agent over a
-  user-only Unix domain socket.
-- **Offline-first renderer** — the editor cannot make arbitrary web requests;
-  only validated YouTube thumbnails use the native allowlisted loader.
+- **Native macOS agent** — AppKit panels, SwiftData persistence, global
+  shortcuts, and System/Light/Dark appearance in an `LSUIElement` app.
+- **Continuous WYSIWYG editing** — a Raycast Notes-style Tiptap/ProseMirror
+  canvas; Markdown remains the stored, copied, and exported format.
+- **Rich Markdown** — headings, emphasis, links, quotes, GFM tables, nested
+  lists, tasks, fenced code with multi-color syntax highlighting, and KaTeX.
+- **Always-available desktop cards** — cards float across apps and Spaces and
+  can be dragged between displays using native macOS window behavior.
+- **Adaptive layouts** — Mini, Sticky Note, Middle Note, Full Screen, and
+  Custom, with content-aware height outside Full Screen.
+- **Command Center** — press `⌥Space` to search recent cards and run commands.
+- **Card Library** — search and edit every card from a native split view.
+- **Attachments and export** — paste images, copy Markdown for local apps, or
+  export a portable `.md + attachments/` bundle for VS Code and repositories.
+- **YouTube covers** — paste a standalone YouTube URL or use `/youtube` to add
+  a clickable 16:9 thumbnail.
+- **CLI automation** — `mdcard` communicates with the single running agent over
+  a user-only Unix domain socket.
 
 ## Install
 
-### Download the release
+### Download v0.1.1
 
-1. Download `Easy-Card-0.1.0-macos.zip` from the
-   [latest release](https://github.com/lemontom0116-maker/easy-card/releases/latest).
-2. Unzip it and move **Easy Card.app** to `/Applications`.
-3. On first launch, Control-click the app and choose **Open** because 0.1.0 is
-   not notarized. If macOS still keeps the downloaded quarantine flag, run:
+1. Download [`Markdown-Card-0.1.1-macos.zip`](https://github.com/lemontom0116-maker/markdown-card/releases/download/v0.1.1/Markdown-Card-0.1.1-macos.zip).
+2. Unzip it and move **Markdown Card.app** to `/Applications`.
+3. On first launch, Control-click the app and choose **Open**. If macOS still
+   retains the quarantine flag, run:
 
 ```bash
-xattr -dr com.apple.quarantine "/Applications/Easy Card.app"
-open "/Applications/Easy Card.app"
+xattr -dr com.apple.quarantine "/Applications/Markdown Card.app"
+open "/Applications/Markdown Card.app"
 ```
+
+### Upgrade from Easy Card 0.1.0
+
+First quit the old agent from Command Center or run `mdcard quit`. Remove the
+old `/Applications/Easy Card.app`, then install `Markdown Card.app` using the
+steps above. Do not keep both apps installed because they intentionally share
+the same bundle identifier for compatibility.
+
+Cards, settings, shortcuts, attachments, and CLI state are preserved: the
+bundle identifier, Application Support directory, UserDefaults, database, and
+IPC protocol have not changed.
 
 ### Build from source
 
 Requirements: Xcode 16 or later, Swift 6, Node.js 20+, and macOS 14+.
 
 ```bash
-git clone https://github.com/lemontom0116-maker/easy-card.git
-cd easy-card
+git clone https://github.com/lemontom0116-maker/markdown-card.git
+cd markdown-card
 npm --prefix Renderer ci
 ./Scripts/build_and_run.sh build
-open "dist/Easy Card.app"
+open "dist/Markdown Card.app"
 ```
 
-The build script bundles the offline renderer, compiles the native app and CLI,
-builds the App Icon asset catalog, and ad-hoc signs `dist/Easy Card.app`.
+The build script bundles the offline renderer, builds the native app and CLI,
+compiles the App Icon asset catalog, and ad-hoc signs the app.
 
-## Use Easy Card
+## Use Markdown Card
 
 ### Global actions
 
@@ -81,7 +90,7 @@ builds the App Icon asset catalog, and ad-hoc signs `dist/Easy Card.app`.
 | Hide the active card | `Esc` or `⌘W` |
 
 Command Center can open cards, create a card, open Card Library or Settings,
-and quit the background agent. Shortcuts can be changed under
+and quit the background agent. Customize global shortcuts under
 **Settings → Shortcuts**.
 
 ### Layouts
@@ -94,12 +103,12 @@ and quit the background agent. Shortcuts can be changed under
 | `⌘4` | Full Screen |
 | `⌘5` | Custom Size |
 
-Drag the 48-point header or title to move a card. Mini keeps only the close
-control and title, revealing Layout on hover.
+Drag the 48-point header or title to move a card, including between displays.
+Mini keeps only the close control and title, revealing Layout on hover.
 
 ### Markdown input
 
-Markdown syntax becomes formatted content as you type. Examples:
+Markdown syntax becomes formatted content while you type:
 
 ````markdown
 # Heading
@@ -107,7 +116,7 @@ Markdown syntax becomes formatted content as you type. Examples:
 - [ ] Task
 **bold** and *italic*
 ```swift
-print("Hello, Easy Card")
+print("Hello, Markdown Card")
 ```
 ````
 
@@ -126,23 +135,23 @@ the existing text is preserved.
 
 ### Images, Copy, and Export
 
-- Paste a clipboard image with `⌘V`; Easy Card stores a validated PNG and keeps
-  standard Markdown such as `![Image](attachments/id.png)`.
-- **Copy** writes the latest Markdown immediately. Managed attachments become
+- Paste a clipboard image with `⌘V`; Markdown Card validates and stores a PNG
+  using standard syntax such as `![Image](attachments/id.png)`.
+- **Copy** immediately writes the latest Markdown. Managed attachments become
   absolute `file://` URLs for local tools such as Obsidian.
-- **Export** appears when a card has attachments. It writes a `.md` file and a
-  sibling `attachments/` folder using portable relative links for VS Code and
-  Git repositories.
+- **Export** appears when a card contains attachments. It writes a `.md` file
+  and sibling `attachments/` folder with portable relative links for VS Code,
+  Git repositories, and static Markdown tooling.
 
 ## CLI
 
-Install the bundled CLI from **Settings → CLI**, or from a source checkout:
+Install the bundled helper from **Settings → CLI**, or from a source checkout:
 
 ```bash
 ./Scripts/build_and_run.sh install-cli
 ```
 
-Make sure `~/.local/bin` is in `PATH`, then use:
+Ensure `~/.local/bin` is in `PATH`, then use:
 
 ```bash
 CARD_ID="$(mdcard create note.md --title "Project note")"
@@ -157,8 +166,8 @@ mdcard delete "$CARD_ID"
 mdcard quit
 ```
 
-The CLI never writes the database directly. It launches Easy Card when needed
-and sends versioned requests to the agent.
+The CLI never writes the database directly. It launches Markdown Card when
+needed and sends versioned requests to the agent.
 
 ## Development
 
@@ -176,6 +185,10 @@ Useful build commands:
 ./Scripts/build_and_run.sh logs
 ```
 
-The renderer is built only at development time and then runs fully offline in
-`WKWebView`. Source dependencies are locked in `Package.resolved` and
+The renderer is built only during development and then runs offline in
+`WKWebView`. Dependencies are locked in `Package.resolved` and
 `Renderer/package-lock.json`.
+
+## License
+
+Markdown Card is available under the [MIT License](LICENSE).

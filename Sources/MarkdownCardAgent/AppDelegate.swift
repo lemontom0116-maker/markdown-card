@@ -25,7 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } catch {
             let alert = NSAlert(error: error)
-            alert.messageText = "Easy Card could not open its card library."
+            alert.messageText = "Markdown Card could not open its card library."
             alert.informativeText = "The SwiftData store was left untouched. Resolve the storage problem and reopen the app.\n\n\(error.localizedDescription)"
             alert.runModal()
             NSApp.terminate(nil)
@@ -102,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 terminationInProgress = false
                 let alert = NSAlert(error: error)
-                alert.messageText = "Easy Card could not save the latest changes."
+                alert.messageText = "Markdown Card could not save the latest changes."
                 alert.informativeText = "Cancel to keep the app open, or quit anyway after copying any unsaved Markdown.\n\n\(error.localizedDescription)"
                 alert.addButton(withTitle: "Cancel")
                 alert.addButton(withTitle: "Quit Anyway")

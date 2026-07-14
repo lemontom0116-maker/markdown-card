@@ -1,6 +1,6 @@
-# Easy Card Renderer
+# Markdown Card Renderer
 
-Offline `WKWebView` renderer for Easy Card. It exports the same API under
+Offline `WKWebView` renderer for Markdown Card. It exports the same API under
 both `window.MarkdownCard` and `window.markdownCard`:
 
 ```js
