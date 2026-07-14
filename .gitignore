@@ -1,0 +1,41 @@
+# macOS and editors
+.DS_Store
+.idea/
+.vscode/
+xcuserdata/
+*.xcuserstate
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Node.js
+Renderer/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Generated renderer and packaged apps
+Resources/Renderer/
+dist/
+release/
+
+# Design mockups and local QA artifacts
+Design/
+design-qa.md
+
+# Local runtime and test data
+*.log
+*.sock
+*.store
+*.store-shm
+*.store-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.backup
+
+# Local configuration
+.env
+.env.*
+!.env.example
