@@ -4,27 +4,86 @@ import UniformTypeIdentifiers
 @preconcurrency import WebKit
 
 final class YouTubeThumbnailSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked Sendable {
-    static let scheme = "mdcard-asset"
-    static let host = "youtube"
-    static let attachmentHost = "attachment"
+    nonisolated static let scheme = "mdcard-asset"
+    nonisolated static let host = "youtube"
+    nonisolated static let attachmentHost = "attachment"
+    nonisolated static let documentHost = "document"
 
     private let loader: YouTubeThumbnailLoader
     private let attachmentStore: LocalAttachmentStore
+    private let documentImageResolver: DocumentImageResolver
+    private let documentImageQueue = DispatchQueue(
+        label: "com.garden100.MarkdownCard.document-image",
+        qos: .userInitiated
+    )
     private let lock = NSLock()
     private var activeTasks: [ObjectIdentifier: URLSessionDataTask] = [:]
+    private var activeDocumentTasks: Set<ObjectIdentifier> = []
     private var stoppedTasks: Set<ObjectIdentifier> = []
+    private var documentRoots: [UUID: URL] = [:]
 
     init(
         loader: YouTubeThumbnailLoader = YouTubeThumbnailLoader(),
-        attachmentStore: LocalAttachmentStore = LocalAttachmentStore()
+        attachmentStore: LocalAttachmentStore = LocalAttachmentStore(),
+        documentImageResolver: DocumentImageResolver = DocumentImageResolver()
     ) {
         self.loader = loader
         self.attachmentStore = attachmentStore
+        self.documentImageResolver = documentImageResolver
         super.init()
+    }
+
+    func setDocumentRoot(_ root: URL?, for cardID: UUID) {
+        lock.withLock {
+            if let root {
+                documentRoots[cardID] = root.standardizedFileURL
+            } else {
+                documentRoots.removeValue(forKey: cardID)
+            }
+        }
     }
 
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
         let identifier = ObjectIdentifier(urlSchemeTask as AnyObject)
+        if let request = DocumentImageRequest.parse(urlSchemeTask.request.url) {
+            guard let root = lock.withLock({ () -> URL? in
+                stoppedTasks.remove(identifier)
+                guard let root = documentRoots[request.cardID] else { return nil }
+                activeDocumentTasks.insert(identifier)
+                return root
+            }) else {
+                urlSchemeTask.didFailWithError(URLError(.noPermissionsToReadFile))
+                return
+            }
+            let taskBox = SchemeTaskBox(urlSchemeTask)
+            documentImageQueue.async { [weak self] in
+                guard let self else { return }
+                let result = Result {
+                    try documentImageResolver.load(
+                        relativePath: request.relativePath,
+                        documentRoot: root
+                    )
+                }
+                Task { @MainActor [weak self] in
+                    guard let self, claim(identifier: identifier) else { return }
+                    switch result {
+                    case let .success(asset):
+                        let response = URLResponse(
+                            url: taskBox.task.request.url!,
+                            mimeType: asset.mimeType,
+                            expectedContentLength: asset.data.count,
+                            textEncodingName: nil
+                        )
+                        taskBox.task.didReceive(response)
+                        taskBox.task.didReceive(asset.data)
+                        taskBox.task.didFinish()
+                    case .failure:
+                        taskBox.task.didFailWithError(URLError(.cannotDecodeContentData))
+                    }
+                }
+            }
+            return
+        }
         if let attachmentID = Self.attachmentID(from: urlSchemeTask.request.url),
            let data = attachmentStore.data(forAttachmentID: attachmentID)
         {
@@ -79,6 +138,7 @@ final class YouTubeThumbnailSchemeHandler: NSObject, WKURLSchemeHandler, @unchec
         let identifier = ObjectIdentifier(urlSchemeTask as AnyObject)
         let task = lock.withLock { () -> URLSessionDataTask? in
             stoppedTasks.insert(identifier)
+            activeDocumentTasks.remove(identifier)
             return activeTasks.removeValue(forKey: identifier)
         }
         task?.cancel()
@@ -110,6 +170,7 @@ final class YouTubeThumbnailSchemeHandler: NSObject, WKURLSchemeHandler, @unchec
     private func claim(identifier: ObjectIdentifier) -> Bool {
         lock.withLock {
             activeTasks.removeValue(forKey: identifier)
+            activeDocumentTasks.remove(identifier)
             if stoppedTasks.remove(identifier) != nil {
                 return false
             }

@@ -8,12 +8,15 @@ struct MDCardCLI: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mdcard",
         abstract: "Show and control native Markdown cards.",
-        version: "0.1.1",
+        version: "0.2.0",
         subcommands: [
             Create.self,
             Show.self,
             Hide.self,
+            Fold.self,
+            Unfold.self,
             Update.self,
+            Tag.self,
             List.self,
             Delete.self,
             Theme.self,
@@ -33,9 +36,38 @@ private struct Create: ParsableCommand {
     @Option(name: .long, help: "Override the title derived from Markdown.")
     var title: String?
 
+    @Option(name: .long, help: "Add a tag. Repeat to add multiple tags.")
+    var tag: [String] = []
+
     func run() throws {
         let markdown = try InputReader.optionalSnapshot(from: file) ?? ""
-        let response = try AgentBridge.send(.create(CreateOptions(markdown: markdown, title: title)))
+        let tags = try tag.map(TagParser.normalizedName)
+        let response = try AgentBridge.send(
+            .create(CreateOptions(markdown: markdown, title: title, tags: tags))
+        )
+        try Console.printMutationOrAcknowledgement(response)
+    }
+}
+
+private struct Tag: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Add a tag to an existing card."
+    )
+
+    @Argument(help: "Card UUID.")
+    var cardID: String
+
+    @Argument(help: "Tag name.")
+    var name: String
+
+    func run() throws {
+        guard let id = UUID(uuidString: cardID) else {
+            throw ValidationError("Invalid card UUID: \(cardID)")
+        }
+        let normalizedName = try TagParser.normalizedName(name)
+        let response = try AgentBridge.send(
+            .tag(TagOptions(cardID: id, name: normalizedName))
+        )
         try Console.printMutationOrAcknowledgement(response)
     }
 }
@@ -81,6 +113,30 @@ private struct Hide: ParsableCommand {
         let selector = try all ? CardSelector.all : SelectorParser.parseCard(target!)
         let response = try AgentBridge.send(.hide(HideOptions(selector: selector)))
         try Console.printMutationOrAcknowledgement(response)
+    }
+}
+
+private struct Fold: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Fold all visible cards into the card stack."
+    )
+
+    func run() throws {
+        let response = try AgentBridge.send(.fold)
+        try Console.requireSuccess(response)
+        print("ok")
+    }
+}
+
+private struct Unfold: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Restore all cards from the card stack."
+    )
+
+    func run() throws {
+        let response = try AgentBridge.send(.unfold)
+        try Console.requireSuccess(response)
+        print("ok")
     }
 }
 
@@ -130,6 +186,9 @@ private struct List: ParsableCommand {
         }
 
         if let list = try? response.decodedPayload(CardListPayload.self) {
+            if list.isFolded {
+                print("Cards are folded.")
+            }
             if list.cards.isEmpty {
                 print("No cards.")
                 return
@@ -211,6 +270,16 @@ private enum SelectorParser {
             throw ValidationError("Expected a card UUID, got: \(argument)")
         }
         return .card(id)
+    }
+}
+
+private enum TagParser {
+    static func normalizedName(_ argument: String) throws -> String {
+        do {
+            return try CardTag(argument).name
+        } catch {
+            throw ValidationError(error.localizedDescription)
+        }
     }
 }
 

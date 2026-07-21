@@ -2,20 +2,39 @@ import AppKit
 import MarkdownCardCore
 import QuartzCore
 
+enum CardContentLayoutMetrics {
+    static let compactBreakpoint: CGFloat = 620
+    static let compactLeading: CGFloat = 28
+    static let regularLeading: CGFloat = 40
+
+    static func leadingInset(for width: CGFloat) -> CGFloat {
+        width <= compactBreakpoint ? compactLeading : regularLeading
+    }
+}
+
 @MainActor
 final class CardHeaderView: NSView, AppearanceConsumer {
-    static let height: CGFloat = 48
+    static let titleRowHeight: CGFloat = 48
+    static let tagRailTop: CGFloat = 44
+    static let tagRailHeight: CGFloat = 24
+    static let expandedHeight: CGFloat = tagRailTop + tagRailHeight
+    /// Compatibility alias for callers that mean the Mini/no-tag height.
+    static let height: CGFloat = titleRowHeight
 
     var onClose: (() -> Void)?
     var onShowLayoutMenu: ((NSView) -> Void)?
     var onCopyMarkdown: (() -> Void)?
     var onExportMarkdown: (() -> Void)?
+    var onTagSelectionChange: ((CardTag?) -> Void)?
+    var onRemoveTag: ((CardTag) -> Void)?
+    var onPreferredHeightChange: ((_ oldHeight: CGFloat, _ newHeight: CGFloat, _ animated: Bool) -> Void)?
     var windowDragHandler: (NSWindow, NSEvent) -> Void = { window, event in
         window.performDrag(with: event)
     }
 
     private let closeButton = CloseDotButton()
     private let titleLabel = DraggableTitleLabel(string: CardRecord.untitledTitle)
+    private let fileStatusLabel = DraggableTitleLabel(string: "")
     private let layoutButton = HeaderIconButton(
         symbolName: "rectangle.3.group",
         accessibilityDescription: "Card layout"
@@ -28,17 +47,24 @@ final class CardHeaderView: NSView, AppearanceConsumer {
         symbolName: "square.and.arrow.down",
         accessibilityDescription: "Export Markdown"
     )
+    private let tagStrip = CurtainTagStripView()
     private var copyFeedbackTask: Task<Void, Never>?
     private var exportFeedbackTask: Task<Void, Never>?
     private var resolvedStyle: ResolvedAppearance = .dark
-    private var trackingAreaReference: NSTrackingArea?
     private var isMini = false
     private var hasManagedAttachments = false
-    private var isHoveringHeader = false
     private var layoutToCopyConstraint: NSLayoutConstraint?
     private var layoutToTrailingConstraint: NSLayoutConstraint?
     private var exportWidthConstraint: NSLayoutConstraint?
     private var copyToExportConstraint: NSLayoutConstraint?
+    private var heightConstraint: NSLayoutConstraint?
+    private var tagLeadingConstraint: NSLayoutConstraint?
+    private var titleToLayoutConstraint: NSLayoutConstraint?
+    private var titleToFileStatusConstraint: NSLayoutConstraint?
+    private var currentTags: [CardTag] = []
+    private var linkedFileURL: URL?
+    private var linkedFileIsDirty = false
+    private(set) var preferredHeight: CGFloat = CardHeaderView.titleRowHeight
     var layoutAnchor: NSView { layoutButton }
 
     // Forward the gesture to AppKit so the Window Server handles display and
@@ -49,6 +75,11 @@ final class CardHeaderView: NSView, AppearanceConsumer {
 
     override func mouseDown(with event: NSEvent) {
         performWindowDrag(with: event)
+    }
+
+    override func layout() {
+        updateTagLeadingInset()
+        super.layout()
     }
 
     override init(frame frameRect: NSRect) {
@@ -78,10 +109,21 @@ final class CardHeaderView: NSView, AppearanceConsumer {
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleLabel.dragOwner = self
 
+        fileStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        fileStatusLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        fileStatusLabel.lineBreakMode = .byTruncatingMiddle
+        fileStatusLabel.maximumNumberOfLines = 1
+        fileStatusLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        fileStatusLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        fileStatusLabel.dragOwner = self
+        fileStatusLabel.isHidden = true
+        fileStatusLabel.setAccessibilityLabel("Linked Markdown file")
+
         layoutButton.translatesAutoresizingMaskIntoConstraints = false
         layoutButton.target = self
         layoutButton.action = #selector(showLayoutMenu(_:))
         layoutButton.toolTip = "Card Layout"
+        layoutButton.setAccessibilityHelp("Choose a card layout")
 
         copyButton.translatesAutoresizingMaskIntoConstraints = false
         copyButton.target = self
@@ -91,15 +133,20 @@ final class CardHeaderView: NSView, AppearanceConsumer {
         exportButton.translatesAutoresizingMaskIntoConstraints = false
         exportButton.target = self
         exportButton.action = #selector(exportMarkdown(_:))
-        exportButton.toolTip = "Export Markdown with Attachments"
-        exportButton.alphaValue = 0
-        exportButton.isHidden = true
+        exportButton.toolTip = "Export Markdown"
+
+        tagStrip.translatesAutoresizingMaskIntoConstraints = false
+        tagStrip.isHidden = true
+        tagStrip.onSelectionChange = { [weak self] tag in self?.onTagSelectionChange?(tag) }
+        tagStrip.onRemoveTag = { [weak self] tag in self?.onRemoveTag?(tag) }
 
         addSubview(closeButton)
         addSubview(titleLabel)
+        addSubview(fileStatusLabel)
         addSubview(layoutButton)
         addSubview(copyButton)
         addSubview(exportButton)
+        addSubview(tagStrip)
 
         let regularLayoutTrailing = layoutButton.trailingAnchor.constraint(
             equalTo: copyButton.leadingAnchor,
@@ -117,34 +164,67 @@ final class CardHeaderView: NSView, AppearanceConsumer {
         let exportWidth = exportButton.widthAnchor.constraint(equalToConstant: 0)
         copyToExportConstraint = copyToExport
         exportWidthConstraint = exportWidth
+        let headerHeight = heightAnchor.constraint(equalToConstant: Self.titleRowHeight)
+        heightConstraint = headerHeight
+        let titleToLayout = titleLabel.trailingAnchor.constraint(
+            lessThanOrEqualTo: layoutButton.leadingAnchor,
+            constant: -8
+        )
+        let titleToFileStatus = titleLabel.trailingAnchor.constraint(
+            lessThanOrEqualTo: fileStatusLabel.leadingAnchor,
+            constant: -8
+        )
+        titleToLayoutConstraint = titleToLayout
+        titleToFileStatusConstraint = titleToFileStatus
+        let tagLeading = tagStrip.leadingAnchor.constraint(
+            equalTo: leadingAnchor,
+            constant: CardContentLayoutMetrics.leadingInset(for: frame.width)
+        )
+        tagLeadingConstraint = tagLeading
 
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: Self.height),
+            headerHeight,
 
             closeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            closeButton.centerYAnchor.constraint(equalTo: topAnchor, constant: Self.titleRowHeight / 2),
             closeButton.widthAnchor.constraint(equalToConstant: 32),
             closeButton.heightAnchor.constraint(equalToConstant: 32),
 
             titleLabel.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 8),
-            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: layoutButton.leadingAnchor, constant: -8),
+            titleLabel.centerYAnchor.constraint(equalTo: topAnchor, constant: Self.titleRowHeight / 2),
+            titleToLayout,
+
+            fileStatusLabel.trailingAnchor.constraint(equalTo: layoutButton.leadingAnchor, constant: -8),
+            fileStatusLabel.centerYAnchor.constraint(equalTo: topAnchor, constant: Self.titleRowHeight / 2),
+            fileStatusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 190),
 
             regularLayoutTrailing,
-            layoutButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            layoutButton.centerYAnchor.constraint(equalTo: topAnchor, constant: Self.titleRowHeight / 2),
             layoutButton.widthAnchor.constraint(equalToConstant: 36),
             layoutButton.heightAnchor.constraint(equalToConstant: 36),
 
-            copyButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            copyButton.centerYAnchor.constraint(equalTo: topAnchor, constant: Self.titleRowHeight / 2),
             copyButton.widthAnchor.constraint(equalToConstant: 36),
             copyButton.heightAnchor.constraint(equalToConstant: 36),
 
             copyToExport,
             exportButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            exportButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            exportButton.centerYAnchor.constraint(equalTo: topAnchor, constant: Self.titleRowHeight / 2),
             exportWidth,
             exportButton.heightAnchor.constraint(equalToConstant: 36),
+
+            tagLeading,
+            tagStrip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            tagStrip.topAnchor.constraint(equalTo: topAnchor, constant: Self.tagRailTop),
+            tagStrip.heightAnchor.constraint(equalToConstant: Self.tagRailHeight),
         ])
+        updateExportVisibility(animated: false)
+    }
+
+    private func updateTagLeadingInset() {
+        let inset = CardContentLayoutMetrics.leadingInset(for: bounds.width)
+        guard tagLeadingConstraint?.constant != inset else { return }
+        tagLeadingConstraint?.constant = inset
     }
 
     fileprivate func performWindowDrag(with event: NSEvent) {
@@ -156,29 +236,51 @@ final class CardHeaderView: NSView, AppearanceConsumer {
         titleLabel.stringValue = title.isEmpty ? CardRecord.untitledTitle : title
     }
 
+    func updateLinkedFile(_ fileURL: URL?, isDirty: Bool) {
+        linkedFileURL = fileURL?.standardizedFileURL
+        linkedFileIsDirty = isDirty
+        updateFileStatusPresentation()
+    }
+
+    func update(tags: [CardTag], activeTagID: String?, animated: Bool) {
+        currentTags = tags
+        tagStrip.update(tags: tags, activeTagID: activeTagID, animated: animated)
+        updateTagPresentation(animated: animated)
+    }
+
     func setMiniMode(_ enabled: Bool) {
         guard isMini != enabled else { return }
         isMini = enabled
         copyButton.isHidden = enabled
+        copyButton.alphaValue = enabled ? 0 : 1
         layoutToCopyConstraint?.isActive = !enabled
         layoutToTrailingConstraint?.isActive = enabled
         updateExportVisibility(animated: false)
-        updateMiniControls(animated: false)
+        updateLayoutButtonPresentation()
+        updateTagPresentation(animated: false)
+        updateFileStatusPresentation()
     }
 
     func setManagedAttachmentsPresent(_ present: Bool, animated: Bool) {
         guard hasManagedAttachments != present else { return }
         hasManagedAttachments = present
+        exportButton.toolTip = present
+            ? "Export Markdown with Attachments"
+            : "Export Markdown"
         updateExportVisibility(animated: animated)
     }
 
     func apply(resolvedAppearance: ResolvedAppearance) {
         resolvedStyle = resolvedAppearance
         titleLabel.textColor = MonochromePalette.secondaryText(for: resolvedStyle)
+        fileStatusLabel.textColor = linkedFileIsDirty
+            ? MonochromePalette.primaryText(for: resolvedStyle)
+            : MonochromePalette.secondaryText(for: resolvedStyle)
         closeButton.apply(resolvedAppearance: resolvedStyle)
         layoutButton.apply(resolvedAppearance: resolvedStyle)
         copyButton.apply(resolvedAppearance: resolvedStyle)
         exportButton.apply(resolvedAppearance: resolvedStyle)
+        tagStrip.apply(resolvedAppearance: resolvedStyle)
     }
 
     func showCopySuccess(_ announcement: String = "Copied") {
@@ -280,62 +382,34 @@ final class CardHeaderView: NSView, AppearanceConsumer {
         onExportMarkdown?()
     }
 
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingAreaReference {
-            removeTrackingArea(trackingAreaReference)
-        }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        trackingAreaReference = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        isHoveringHeader = true
-        updateMiniControls(animated: true)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHoveringHeader = false
-        updateMiniControls(animated: true)
-    }
-
-    private func updateMiniControls(animated: Bool) {
-        let shouldShowLayout = !isMini || isHoveringHeader
-        layoutButton.isEnabled = shouldShowLayout
-        let changes = { [self] in
-            layoutButton.animator().alphaValue = shouldShowLayout ? 1 : 0
-        }
-        if animated, window?.isVisible == true {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.12
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                changes()
-            }
+    private func updateLayoutButtonPresentation() {
+        if isMini {
+            layoutButton.toolTip = "Choose Card Layout — Restore from Mini (⌃2 for Sticky Note)"
+            layoutButton.setAccessibilityHelp(
+                "Choose another card layout to restore the editor. "
+                    + "Press Control-2 for Sticky Note."
+            )
         } else {
-            layoutButton.alphaValue = shouldShowLayout ? 1 : 0
+            layoutButton.toolTip = "Card Layout"
+            layoutButton.setAccessibilityHelp("Choose a card layout")
         }
     }
 
     private func updateExportVisibility(animated: Bool) {
-        let shouldShow = hasManagedAttachments && !isMini
-        if shouldShow { exportButton.isHidden = false }
-        copyToExportConstraint?.constant = shouldShow ? -2 : 0
+        let shouldReserveSpace = !isMini
+        let shouldDisplay = shouldReserveSpace
+        if shouldDisplay { exportButton.isHidden = false }
+        copyToExportConstraint?.constant = shouldReserveSpace ? -2 : 0
         let duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.14
         let applyChanges = { [self] in
-            exportWidthConstraint?.animator().constant = shouldShow ? 36 : 0
-            exportButton.animator().alphaValue = shouldShow ? 1 : 0
+            exportWidthConstraint?.animator().constant = shouldReserveSpace ? 36 : 0
+            exportButton.animator().alphaValue = shouldDisplay ? 1 : 0
             layoutSubtreeIfNeeded()
         }
         guard animated, duration > 0, window?.isVisible == true else {
-            exportWidthConstraint?.constant = shouldShow ? 36 : 0
-            exportButton.alphaValue = shouldShow ? 1 : 0
-            exportButton.isHidden = !shouldShow
+            exportWidthConstraint?.constant = shouldReserveSpace ? 36 : 0
+            exportButton.alphaValue = shouldDisplay ? 1 : 0
+            exportButton.isHidden = !shouldDisplay
             layoutSubtreeIfNeeded()
             return
         }
@@ -345,10 +419,67 @@ final class CardHeaderView: NSView, AppearanceConsumer {
             applyChanges()
         } completionHandler: { [weak self] in
             Task { @MainActor [weak self] in
-                self?.exportButton.isHidden = !shouldShow
+                self?.exportButton.isHidden = !shouldDisplay
             }
         }
     }
+
+    private func updateTagPresentation(animated: Bool) {
+        let shouldReserveTagRail = !isMini && !currentTags.isEmpty
+        let shouldDisplay = shouldReserveTagRail
+        tagStrip.isHidden = !shouldDisplay
+        tagStrip.alphaValue = shouldDisplay ? 1 : 0
+        let nextHeight = shouldReserveTagRail
+            ? Self.expandedHeight
+            : Self.titleRowHeight
+        guard preferredHeight != nextHeight else { return }
+
+        let oldHeight = preferredHeight
+        preferredHeight = nextHeight
+        let shouldAnimate = animated
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        onPreferredHeightChange?(oldHeight, nextHeight, shouldAnimate)
+
+        let duration: TimeInterval = 0.14
+        guard shouldAnimate, window?.isVisible == true else {
+            heightConstraint?.constant = nextHeight
+            layoutSubtreeIfNeeded()
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            heightConstraint?.animator().constant = nextHeight
+            layoutSubtreeIfNeeded()
+        }
+    }
+
+    private func updateFileStatusPresentation() {
+        let shouldReserveSpace = !isMini && linkedFileURL != nil
+        let shouldDisplay = shouldReserveSpace
+        fileStatusLabel.isHidden = !shouldDisplay
+        fileStatusLabel.alphaValue = shouldDisplay ? 1 : 0
+        titleToLayoutConstraint?.isActive = !shouldReserveSpace
+        titleToFileStatusConstraint?.isActive = shouldReserveSpace
+        guard shouldReserveSpace, let linkedFileURL else { return }
+
+        let filename = linkedFileURL.lastPathComponent
+        fileStatusLabel.stringValue = linkedFileIsDirty
+            ? "\(filename) · Edited"
+            : filename
+        fileStatusLabel.toolTip = linkedFileIsDirty
+            ? "\(linkedFileURL.path) — changes have not been saved to this file"
+            : linkedFileURL.path
+        fileStatusLabel.setAccessibilityHelp(
+            linkedFileIsDirty
+                ? "\(filename), edited and not saved to the linked file"
+                : "\(filename), saved to the linked file"
+        )
+        fileStatusLabel.textColor = linkedFileIsDirty
+            ? MonochromePalette.primaryText(for: resolvedStyle)
+            : MonochromePalette.secondaryText(for: resolvedStyle)
+    }
+
 }
 
 @MainActor
@@ -384,6 +515,7 @@ private final class HeaderIconButton: NSButton {
     private var resolvedStyle: ResolvedAppearance = .dark
     private var trackingAreaReference: NSTrackingArea?
     private var isHovering = false
+    private(set) var hasKeyboardFocus = false
 
     init(symbolName: String, accessibilityDescription: String) {
         super.init(frame: .zero)
@@ -399,6 +531,20 @@ private final class HeaderIconButton: NSButton {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func becomeFirstResponder() -> Bool {
+        guard super.becomeFirstResponder() else { return false }
+        updateKeyboardFocus(true)
+        return true
+    }
+
+    override func resignFirstResponder() -> Bool {
+        guard super.resignFirstResponder() else { return false }
+        updateKeyboardFocus(false)
+        return true
     }
 
     func setSymbol(_ symbolName: String, accessibilityDescription: String) {
@@ -417,11 +563,27 @@ private final class HeaderIconButton: NSButton {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        if isHovering {
+        if isHovering || hasKeyboardFocus {
             MonochromePalette.controlFill(for: resolvedStyle).setFill()
             NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 8, yRadius: 8).fill()
         }
         super.draw(dirtyRect)
+        if hasKeyboardFocus {
+            NSColor.keyboardFocusIndicatorColor.setStroke()
+            let focusPath = NSBezierPath(
+                roundedRect: bounds.insetBy(dx: 3, dy: 3),
+                xRadius: 7,
+                yRadius: 7
+            )
+            focusPath.lineWidth = 2
+            focusPath.stroke()
+        }
+    }
+
+    private func updateKeyboardFocus(_ focused: Bool) {
+        guard hasKeyboardFocus != focused else { return }
+        hasKeyboardFocus = focused
+        needsDisplay = true
     }
 
     override func updateTrackingAreas() {

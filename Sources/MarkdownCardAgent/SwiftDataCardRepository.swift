@@ -177,9 +177,182 @@ enum MarkdownCardSchemaV3: VersionedSchema {
     }
 }
 
+enum MarkdownCardSchemaV4: VersionedSchema {
+    static let versionIdentifier = Schema.Version(4, 0, 0)
+    static var models: [any PersistentModel.Type] { [StoredCard.self] }
+
+    @Model
+    final class StoredCard {
+        @Attribute(.unique) var id: UUID
+        var title: String
+        var titleOverride: String?
+        var markdown: String
+        var isQuick: Bool
+        var isVisible: Bool
+        var themeID: String
+        var createdAt: Date
+        var updatedAt: Date
+        var windowX: Double?
+        var windowY: Double?
+        var windowWidth: Double?
+        var windowHeight: Double?
+        var screenID: String?
+        var layoutModeRaw: String?
+        var customWidth: Double?
+        var customMinimumHeight: Double?
+        var customMaximumHeight: Double?
+        var tagsData: Data?
+
+        init(card: CardRecord) {
+            id = card.id
+            title = card.title
+            titleOverride = card.titleOverride
+            markdown = card.markdown
+            isQuick = card.isQuick
+            isVisible = card.isVisible
+            themeID = card.themeID
+            createdAt = card.createdAt
+            updatedAt = card.updatedAt
+            screenID = card.screenID
+            setLayout(card)
+            setWindowFrame(card.windowFrame)
+            setTags(card.tags)
+        }
+
+        func update(from card: CardRecord) {
+            title = card.title
+            titleOverride = card.titleOverride
+            markdown = card.markdown
+            isQuick = card.isQuick
+            isVisible = card.isVisible
+            themeID = card.themeID
+            createdAt = card.createdAt
+            updatedAt = card.updatedAt
+            screenID = card.screenID
+            setLayout(card)
+            setWindowFrame(card.windowFrame)
+            setTags(card.tags)
+        }
+
+        func cardRecord() throws -> CardRecord {
+            let restoredOverride = titleOverride
+                ?? (title == CardRecord.derivedTitle(from: markdown) ? nil : title)
+            let frame = decodedWindowFrame()
+            let isLegacyFullScreenLayout = layoutModeRaw == "fullScreen"
+            let storedLayoutMode = try decodedLayoutMode()
+            let legacyCustom = CustomCardLayout(
+                width: max(320, frame?.width ?? CustomCardLayout.legacyDefault.width),
+                minimumHeight: CustomCardLayout.legacyDefault.minimumHeight,
+                maximumHeight: CustomCardLayout.legacyDefault.maximumHeight
+            )
+            let storedCustom: CustomCardLayout? = customWidth.flatMap { width -> CustomCardLayout? in
+                guard let customMinimumHeight, let customMaximumHeight else { return nil }
+                let value = CustomCardLayout(
+                    width: width,
+                    minimumHeight: customMinimumHeight,
+                    maximumHeight: customMaximumHeight
+                )
+                return value.isValid ? value : nil
+            }
+            return CardRecord(
+                id: id,
+                titleOverride: restoredOverride,
+                markdown: markdown,
+                isQuick: isQuick,
+                isVisible: isVisible,
+                themeID: themeID,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                windowFrame: isLegacyFullScreenLayout ? nil : frame,
+                screenID: isLegacyFullScreenLayout ? nil : screenID,
+                layoutMode: storedLayoutMode ?? .custom,
+                customLayout: isLegacyFullScreenLayout
+                    ? nil
+                    : (storedLayoutMode == nil ? legacyCustom : storedCustom),
+                tags: try decodedTags()
+            )
+        }
+
+        var hasLegacyFullScreenLayout: Bool {
+            layoutModeRaw == "fullScreen"
+        }
+
+        func normalizeLegacyFullScreenLayout() {
+            guard hasLegacyFullScreenLayout else { return }
+            layoutModeRaw = CardLayoutMode.middle.rawValue
+            windowX = nil
+            windowY = nil
+            windowWidth = nil
+            windowHeight = nil
+            screenID = nil
+            customWidth = nil
+            customMinimumHeight = nil
+            customMaximumHeight = nil
+        }
+
+        private func setLayout(_ card: CardRecord) {
+            layoutModeRaw = card.layoutMode.rawValue
+            customWidth = card.customLayout?.width
+            customMinimumHeight = card.customLayout?.minimumHeight
+            customMaximumHeight = card.customLayout?.maximumHeight
+        }
+
+        private func setWindowFrame(_ frame: WindowFrame?) {
+            guard let frame, frame.isValid else {
+                windowX = nil
+                windowY = nil
+                windowWidth = nil
+                windowHeight = nil
+                return
+            }
+            windowX = frame.x
+            windowY = frame.y
+            windowWidth = frame.width
+            windowHeight = frame.height
+        }
+
+        private func decodedWindowFrame() -> WindowFrame? {
+            guard let windowX, let windowY, let windowWidth, let windowHeight else { return nil }
+            let frame = WindowFrame(
+                x: windowX,
+                y: windowY,
+                width: windowWidth,
+                height: windowHeight
+            )
+            return frame.isValid ? frame : nil
+        }
+
+        private func decodedLayoutMode() throws -> CardLayoutMode? {
+            guard let layoutModeRaw else { return nil }
+            if layoutModeRaw == "fullScreen" { return .middle }
+            guard let layoutMode = CardLayoutMode(rawValue: layoutModeRaw) else {
+                throw CardRepositoryError.corruptStore(
+                    "Invalid layout mode '\(layoutModeRaw)' for card \(id.uuidString)."
+                )
+            }
+            return layoutMode
+        }
+
+        private func setTags(_ tags: [CardTag]) {
+            tagsData = tags.isEmpty ? nil : try? JSONEncoder().encode(tags)
+        }
+
+        private func decodedTags() throws -> [CardTag] {
+            guard let tagsData else { return [] }
+            do {
+                return try JSONDecoder().decode([CardTag].self, from: tagsData)
+            } catch {
+                throw CardRepositoryError.corruptStore(
+                    "Invalid Tag metadata for card \(id.uuidString): \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+}
+
 enum MarkdownCardMigrationPlan: SchemaMigrationPlan {
     static var schemas: [any VersionedSchema.Type] {
-        [MarkdownCardSchemaV2.self, MarkdownCardSchemaV3.self]
+        [MarkdownCardSchemaV2.self, MarkdownCardSchemaV3.self, MarkdownCardSchemaV4.self]
     }
 
     static var stages: [MigrationStage] {
@@ -188,11 +361,15 @@ enum MarkdownCardMigrationPlan: SchemaMigrationPlan {
                 fromVersion: MarkdownCardSchemaV2.self,
                 toVersion: MarkdownCardSchemaV3.self
             ),
+            .lightweight(
+                fromVersion: MarkdownCardSchemaV3.self,
+                toVersion: MarkdownCardSchemaV4.self
+            ),
         ]
     }
 }
 
-private typealias StoredCard = MarkdownCardSchemaV3.StoredCard
+private typealias StoredCard = MarkdownCardSchemaV4.StoredCard
 
 actor SwiftDataCardRepository: CardRepository {
     nonisolated static var defaultStoreURL: URL {
@@ -216,7 +393,8 @@ actor SwiftDataCardRepository: CardRepository {
             withIntermediateDirectories: true
         )
         try Self.backUpLegacyStoreIfNeeded(at: storeURL)
-        let schema = Schema(versionedSchema: MarkdownCardSchemaV3.self)
+        try Self.backUpTagV4StoreIfNeeded(at: storeURL)
+        let schema = Schema(versionedSchema: MarkdownCardSchemaV4.self)
         let configuration = ModelConfiguration(
             "MarkdownCard",
             schema: schema,
@@ -234,7 +412,7 @@ actor SwiftDataCardRepository: CardRepository {
 
     init(inMemory: Bool) throws {
         storeURL = nil
-        let schema = Schema(versionedSchema: MarkdownCardSchemaV3.self)
+        let schema = Schema(versionedSchema: MarkdownCardSchemaV4.self)
         let configuration = ModelConfiguration(
             "MarkdownCardTests",
             schema: schema,
@@ -251,8 +429,9 @@ actor SwiftDataCardRepository: CardRepository {
     }
 
     func allCards() throws -> [CardRecord] {
-        try context.fetch(FetchDescriptor<StoredCard>())
-            .map { $0.cardRecord() }
+        try loadCardsMigratingLegacyLayouts(
+            try context.fetch(FetchDescriptor<StoredCard>())
+        )
             .sorted {
                 if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
                 return $0.id.uuidString < $1.id.uuidString
@@ -260,7 +439,8 @@ actor SwiftDataCardRepository: CardRepository {
     }
 
     func card(id: UUID) throws -> CardRecord? {
-        try storedCard(id: id)?.cardRecord()
+        guard let storedCard = try storedCard(id: id) else { return nil }
+        return try loadCardsMigratingLegacyLayouts([storedCard]).first
     }
 
     @discardableResult
@@ -316,6 +496,23 @@ actor SwiftDataCardRepository: CardRepository {
         return records.first { $0.id == id }
     }
 
+    private func loadCardsMigratingLegacyLayouts(
+        _ storedCards: [StoredCard]
+    ) throws -> [CardRecord] {
+        let records = try storedCards.map { try $0.cardRecord() }
+        let legacyCards = storedCards.filter(\.hasLegacyFullScreenLayout)
+        guard !legacyCards.isEmpty else { return records }
+
+        legacyCards.forEach { $0.normalizeLegacyFullScreenLayout() }
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            throw error
+        }
+        return records
+    }
+
     private nonisolated static func backUpLegacyStoreIfNeeded(at storeURL: URL) throws {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: storeURL.path) else { return }
@@ -338,5 +535,29 @@ actor SwiftDataCardRepository: CardRepository {
             )
         }
         try Data("protocol-v3\n".utf8).write(to: marker, options: .atomic)
+    }
+
+    private nonisolated static func backUpTagV4StoreIfNeeded(at storeURL: URL) throws {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: storeURL.path) else { return }
+        let marker = storeURL.deletingLastPathComponent()
+            .appendingPathComponent("tag-v4-migration.backed-up")
+        guard !fileManager.fileExists(atPath: marker.path) else { return }
+
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        let backupDirectory = storeURL.deletingLastPathComponent()
+            .appendingPathComponent("Migration Backups", isDirectory: true)
+            .appendingPathComponent("\(stamp)-tag-v4", isDirectory: true)
+        try fileManager.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+        for suffix in ["", "-shm", "-wal"] {
+            let source = URL(fileURLWithPath: storeURL.path + suffix)
+            guard fileManager.fileExists(atPath: source.path) else { continue }
+            try fileManager.copyItem(
+                at: source,
+                to: backupDirectory.appendingPathComponent(source.lastPathComponent)
+            )
+        }
+        try Data("tag-v4\n".utf8).write(to: marker, options: .atomic)
     }
 }

@@ -1,18 +1,17 @@
 import AppKit
 import MarkdownCardCore
+import QuartzCore
 
 enum CardLayoutPreset: Int, CaseIterable {
     case mini
     case stickyNote
     case middleNote
-    case fullScreen
 
     var mode: CardLayoutMode {
         switch self {
         case .mini: .mini
         case .stickyNote: .sticky
         case .middleNote: .middle
-        case .fullScreen: .fullScreen
         }
     }
 
@@ -21,7 +20,6 @@ enum CardLayoutPreset: Int, CaseIterable {
         case .mini: "Mini"
         case .stickyNote: "Sticky Note"
         case .middleNote: "Middle Note"
-        case .fullScreen: "Full Screen"
         }
     }
 
@@ -41,27 +39,26 @@ enum CardLayoutGeometry {
         for mode: CardLayoutMode,
         contentHeight: CGFloat,
         custom: CustomCardLayout?,
-        visibleFrame: NSRect
+        visibleFrame: NSRect,
+        chromeHeight: CGFloat = headerHeight
     ) -> CGFloat {
         switch mode {
         case .mini:
             return headerHeight
-        case .fullScreen:
-            return visibleFrame.height
         case .sticky:
             return clamp(
-                headerHeight + contentHeight,
+                chromeHeight + contentHeight,
                 to: fittedRange(stickyHeightRange, visibleFrame: visibleFrame)
             )
         case .middle:
             return clamp(
-                headerHeight + contentHeight,
+                chromeHeight + contentHeight,
                 to: fittedRange(middleHeightRange, visibleFrame: visibleFrame)
             )
         case .custom:
             let settings = custom?.isValid == true ? custom! : .legacyDefault
             return clamp(
-                headerHeight + contentHeight,
+                chromeHeight + contentHeight,
                 to: fittedRange(
                     CGFloat(settings.minimumHeight) ... CGFloat(settings.maximumHeight),
                     visibleFrame: visibleFrame
@@ -80,7 +77,6 @@ enum CardLayoutGeometry {
         case .mini: proposed = miniSize.width
         case .sticky: proposed = stickyWidth
         case .middle: proposed = middleWidth
-        case .fullScreen: proposed = visibleFrame.width
         case .custom:
             proposed = CGFloat((custom?.isValid == true ? custom : .legacyDefault)!.width)
         }
@@ -92,16 +88,17 @@ enum CardLayoutGeometry {
         for mode: CardLayoutMode,
         contentHeight: CGFloat,
         custom: CustomCardLayout?,
-        visibleFrame: NSRect
+        visibleFrame: NSRect,
+        chromeHeight: CGFloat = headerHeight
     ) -> NSRect {
-        if mode == .fullScreen { return visibleFrame }
         let size = NSSize(
             width: width(for: mode, custom: custom, visibleFrame: visibleFrame),
             height: totalHeight(
                 for: mode,
                 contentHeight: contentHeight,
                 custom: custom,
-                visibleFrame: visibleFrame
+                visibleFrame: visibleFrame,
+                chromeHeight: chromeHeight
             )
         )
         return NSRect(
@@ -117,14 +114,16 @@ enum CardLayoutGeometry {
         mode: CardLayoutMode,
         contentHeight: CGFloat,
         custom: CustomCardLayout?,
-        visibleFrame: NSRect
+        visibleFrame: NSRect,
+        chromeHeight: CGFloat = headerHeight
     ) -> NSRect {
         let targetWidth = width(for: mode, custom: custom, visibleFrame: visibleFrame)
         let targetHeight = totalHeight(
             for: mode,
             contentHeight: contentHeight,
             custom: custom,
-            visibleFrame: visibleFrame
+            visibleFrame: visibleFrame,
+            chromeHeight: chromeHeight
         )
         let anchor = CardResizeAnchor.nearest(to: oldFrame, in: visibleFrame)
         let originX = anchor == .topRight ? oldFrame.maxX - targetWidth : oldFrame.minX
@@ -164,19 +163,29 @@ enum CardResizeAnchor: Equatable {
 @MainActor
 final class CardPanelController: NSWindowController, NSWindowDelegate, AppearanceConsumer {
     var onMarkdownChange: ((UUID, String, UInt64, EditorSourceID) -> Void)?
+    var onTagCommandSubmitted: ((UUID, String, String, UInt64, EditorSourceID) -> Void)?
+    var onActivateTag: ((UUID, String) -> Void)?
+    var onRemoveTag: ((UUID, String) -> Void)?
+    var onNavigateSeries: ((UUID, String, SeriesNavigationDirection) -> Void)?
     var onRequestHide: ((UUID) -> Void)?
     var onCreateCard: (() -> Void)?
     var onFrameChange: ((UUID, WindowFrame, String?) -> Void)?
     var onLayoutChange: ((UUID, CardLayoutMode, CustomCardLayout?) -> Void)?
     var onBecameKey: ((UUID) -> Void)?
+    var onRequestPresetPlacement: ((UUID) -> Void)?
+    var onRequestFoldAllCards: (() -> Void)?
+    var onRequestSaveAs: ((UUID) -> Void)?
 
     private(set) var card: CardRecord
+    private(set) var activeTagID: String?
     let editorSourceID = EditorSourceID()
     private let appearanceController: AppearanceController
     private let rootView = AppearanceObservingView()
     private let headerView = CardHeaderView()
     private let previewView: MarkdownPreviewView
+    private let externalSeriesNavigation = ExternalSeriesNavigationController()
     private let exportService = MarkdownExportService()
+    private let placementPreferences: CardPlacementPreferences
     private var appearance: ResolvedAppearance
     private var revision: UInt64 = 0
     private weak var layoutMenuAnchor: NSView?
@@ -184,11 +193,26 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
     private var lastContentHeight: CGFloat = 0
     private var isApplyingFrame = false
     private var isUserLiveResizing = false
-    private var frameBeforeFullScreen: NSRect?
+    private var isUpdatingLayoutPresentation = false
+    private var isRebindingCard = false
+    private var seriesNeighbors: CardSeriesNeighbors?
+    private var fileBinding: CardFileBinding?
 
-    init(card: CardRecord, appearanceController: AppearanceController) {
+    private var documentRootURL: URL? {
+        fileBinding?.fileURL.deletingLastPathComponent().standardizedFileURL
+    }
+
+    init(
+        card: CardRecord,
+        appearanceController: AppearanceController,
+        placementPreferences: CardPlacementPreferences = CardPlacementPreferences(),
+        fileBinding: CardFileBinding? = nil
+    ) {
         self.card = card
+        activeTagID = nil
         self.appearanceController = appearanceController
+        self.placementPreferences = placementPreferences
+        self.fileBinding = fileBinding
         let initialAppearance = appearanceController.resolvedAppearance
         appearance = initialAppearance
         previewView = MarkdownPreviewView(initialAppearance: initialAppearance)
@@ -203,6 +227,7 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         super.init(window: panel)
         configurePanel(panel)
         configureContent()
+        previewView.setDocumentRoot(self.documentRootURL, for: card.id)
         appearanceController.register(self)
     }
 
@@ -216,15 +241,14 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
     }
 
     func update(card newCard: CardRecord, revision authoritativeRevision: UInt64? = nil) {
-        let previousLayoutMode = card.layoutMode
         let markdownChanged = newCard.markdown != card.markdown
         let layoutChanged = newCard.layoutMode != card.layoutMode
             || newCard.customLayout != card.customLayout
-        let transitionAnchor = prepareLayoutTransition(
-            from: previousLayoutMode,
-            to: newCard.layoutMode
-        )
         card = newCard
+        activeTagID = Self.validatedActiveTagID(activeTagID, for: card.tags)
+        if activeTagID == nil {
+            seriesNeighbors = nil
+        }
         if let authoritativeRevision {
             revision = max(revision, authoritativeRevision)
         } else if markdownChanged {
@@ -233,13 +257,107 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         updateHeader()
         updateLayoutPresentation()
         if layoutChanged {
-            applyCurrentLayout(
-                centered: false,
-                animate: false,
-                anchorFrame: transitionAnchor
-            )
-            finishLayoutTransition(from: previousLayoutMode, to: newCard.layoutMode)
+            applyCurrentLayout(centered: false, animate: false)
         }
+        renderDocument()
+    }
+
+    /// Updates only native Tag/series chrome. This deliberately does not send
+    /// a render payload back into WebKit, so a source editor that submitted a
+    /// `/tag` command keeps its selection and undo history intact.
+    func applyTagMetadata(
+        card newCard: CardRecord,
+        activeTagID requestedActiveTagID: String?,
+        neighbors: CardSeriesNeighbors?,
+        animated: Bool = true
+    ) {
+        guard newCard.id == card.id else { return }
+        card.title = newCard.title
+        card.titleOverride = newCard.titleOverride
+        card.tags = newCard.tags
+        card.updatedAt = newCard.updatedAt
+        activeTagID = Self.validatedActiveTagID(
+            requestedActiveTagID,
+            for: card.tags
+        )
+        seriesNeighbors = activeTagID == nil ? nil : neighbors
+        updateHeader(animatedTags: animated)
+        updateSeriesNavigationPresentation(animated: animated)
+    }
+
+    /// Applies the Agent's current immutable series snapshot without touching
+    /// the editor document.
+    func applySeriesContext(
+        activeTagID requestedActiveTagID: String?,
+        neighbors: CardSeriesNeighbors?,
+        animated: Bool = true
+    ) {
+        activeTagID = Self.validatedActiveTagID(
+            requestedActiveTagID,
+            for: card.tags
+        )
+        seriesNeighbors = activeTagID == nil ? nil : neighbors
+        updateHeader(animatedTags: animated)
+        updateSeriesNavigationPresentation(animated: animated)
+    }
+
+    /// Reuses this physical window for another card in the active Tag series.
+    /// The current frame and Layout belong to the window, not the page, so they
+    /// are retained while the target document and authoritative revision are
+    /// replaced atomically.
+    func rebind(
+        card newCard: CardRecord,
+        revision authoritativeRevision: UInt64,
+        activeTagID requestedActiveTagID: String?,
+        neighbors: CardSeriesNeighbors?,
+        fileBinding: CardFileBinding? = nil
+    ) {
+        let preservedLayoutMode = card.layoutMode
+        let preservedCustomLayout = card.customLayout
+        let preservedWindowFrame = window.map { panel in
+            return WindowFrame(
+                x: panel.frame.origin.x,
+                y: panel.frame.origin.y,
+                width: panel.frame.width,
+                height: panel.frame.height
+            )
+        }
+        let preservedScreenID = window?.screen?.localizedName ?? card.screenID
+
+        var reboundCard = newCard
+        reboundCard.layoutMode = preservedLayoutMode
+        reboundCard.customLayout = preservedCustomLayout
+        reboundCard.windowFrame = preservedWindowFrame
+        reboundCard.screenID = preservedScreenID
+
+        isRebindingCard = true
+        card = reboundCard
+        revision = authoritativeRevision
+        self.fileBinding = fileBinding
+        previewView.setDocumentRoot(self.documentRootURL, for: card.id)
+        activeTagID = Self.validatedActiveTagID(
+            requestedActiveTagID,
+            for: card.tags
+        )
+        seriesNeighbors = activeTagID == nil ? nil : neighbors
+        updateHeader(animatedTags: false)
+        updateLayoutPresentation()
+        isRebindingCard = false
+
+        updateSeriesNavigationPresentation(animated: false)
+        renderDocument()
+        if card.layoutMode != .mini {
+            previewView.focusEditor()
+            previewView.requestContentHeight()
+        }
+        onBecameKey?(card.id)
+    }
+
+    func setFileBinding(_ binding: CardFileBinding?) {
+        guard binding != fileBinding else { return }
+        fileBinding = binding
+        previewView.setDocumentRoot(documentRootURL, for: card.id)
+        updateHeader()
         renderDocument()
     }
 
@@ -252,7 +370,7 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         appearanceController.applyMode(to: panel)
         updateLayoutPresentation()
 
-        if centerIfNeeded || card.layoutMode == .fullScreen {
+        if centerIfNeeded {
             applyCurrentLayout(on: screen, centered: true, animate: false)
         } else if let visibleFrame = (screen ?? panel.screen ?? NSScreen.main)?.visibleFrame {
             panel.setFrame(panel.frame.constrained(to: visibleFrame), display: false)
@@ -260,11 +378,13 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
 
         guard activate else {
             panel.orderFront(nil)
+            updateSeriesNavigationPresentation(animated: false)
             return
         }
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         onBecameKey?(card.id)
+        updateSeriesNavigationPresentation(animated: false)
         if card.layoutMode != .mini {
             previewView.focusEditor()
             previewView.requestContentHeight()
@@ -273,6 +393,8 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
 
     func hide(flushingPendingChanges shouldFlush: Bool = true) {
         if shouldFlush { flushPendingChanges() }
+        previewView.dismissTransientUI()
+        externalSeriesNavigation.setVisible(false, animated: false)
         window?.orderOut(nil)
     }
 
@@ -285,19 +407,94 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         flushFrameSave()
     }
 
+    func logicalWindowFrame() -> WindowFrame? {
+        guard let window else { return nil }
+        let frame = window.frame
+        return WindowFrame(
+            x: frame.origin.x,
+            y: frame.origin.y,
+            width: frame.width,
+            height: frame.height
+        )
+    }
+
     func flushLatestMarkdownForTermination() async {
-        if let markdown = await previewView.currentMarkdown(), markdown != card.markdown {
+        _ = try? await latestMarkdownForFileOperation()
+        flushPendingChanges()
+    }
+
+    /// Pulls the live editor snapshot before an external file operation. The
+    /// renderer's state is authoritative here; the native card can still be
+    /// waiting for a coalesced bridge update when the user presses Save.
+    func latestMarkdownForFileOperation() async throws -> String {
+        let markdown: String
+        switch await previewView.currentMarkdownSnapshot() {
+        case let .markdown(value):
+            markdown = value
+        case .notLoaded:
+            // A WebView that has not finished loading has no newer editable
+            // state, so the last accepted native snapshot remains the safest
+            // compatibility fallback.
+            return card.markdown
+        case let .failure(error):
+            // File operations must never turn a renderer read failure into a
+            // successful save of an older native snapshot.
+            throw error
+        }
+        if markdown != card.markdown {
             revision &+= 1
             card.updateMarkdown(markdown)
             updateHeader()
             onMarkdownChange?(card.id, markdown, revision, editorSourceID)
         }
-        flushPendingChanges()
+        return markdown
+    }
+
+    func latestMarkdownExportBundleForFileOperation() async throws -> MarkdownExportBundle {
+        let firstSnapshot = try await latestMarkdownForFileOperation()
+        guard let bundle = await previewView.currentMarkdownExportBundle() else {
+            throw RendererMarkdownSnapshotError.unavailable
+        }
+        // The bundle bridge is a second asynchronous round trip. If the user
+        // typed between the two replies, make the exact exported Markdown the
+        // native baseline used by the Save As race guard.
+        if bundle.markdown != firstSnapshot, bundle.markdown != card.markdown {
+            revision &+= 1
+            card.updateMarkdown(bundle.markdown)
+            updateHeader()
+            onMarkdownChange?(card.id, bundle.markdown, revision, editorSourceID)
+        }
+        return bundle
     }
 
     func requestHide() {
         flushPendingChanges()
         onRequestHide?(card.id)
+    }
+
+    func requestPresetPlacement() {
+        onRequestPresetPlacement?(card.id)
+    }
+
+    func moveToPresetPlacement(avoiding occupiedFrames: [NSRect]) {
+        guard let panel = window as? CommandPanel,
+              let visibleFrame = panel.screen?.visibleFrame,
+              let anchor = placementPreferences.anchor(for: card.layoutMode)
+        else { return }
+
+        guard let targetFrame = CardPlacementGeometry.availableFrame(
+            for: panel.frame,
+            anchor: anchor,
+            visibleFrame: visibleFrame,
+            avoiding: occupiedFrames
+        ) else { return }
+        guard !NSEqualRects(panel.frame, targetFrame) else { return }
+        let shouldAnimate = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        isApplyingFrame = true
+        panel.setFrame(targetFrame, display: true, animate: shouldAnimate)
+        isApplyingFrame = false
+        externalSeriesNavigation.updateLayout()
+        scheduleFrameSave()
     }
 
     func apply(resolvedAppearance: ResolvedAppearance) {
@@ -306,6 +503,7 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         synchronizeWindowSurface()
         headerView.apply(resolvedAppearance: appearance)
         previewView.apply(resolvedAppearance: appearance)
+        externalSeriesNavigation.apply(resolvedAppearance: appearance)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -313,25 +511,37 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         return false
     }
 
-    func windowDidMove(_ notification: Notification) { scheduleFrameSave() }
+    func windowDidMove(_ notification: Notification) {
+        externalSeriesNavigation.updateLayout()
+        scheduleFrameSave()
+    }
 
     func windowDidChangeScreen(_ notification: Notification) {
         updateWindowSizingLimits()
         synchronizeWindowSurface()
+        externalSeriesNavigation.updateLayout()
         scheduleFrameSave()
     }
 
     func windowDidResize(_ notification: Notification) {
         synchronizeContentViewFrame()
         synchronizeWindowSurface()
+        externalSeriesNavigation.updateLayout()
         scheduleFrameSave()
-        if !isApplyingFrame, card.layoutMode != .mini, card.layoutMode != .fullScreen {
+        if !isApplyingFrame,
+           card.layoutMode != .mini {
             previewView.requestContentHeight()
         }
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
         onBecameKey?(card.id)
+        updateSeriesNavigationPresentation(animated: true)
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        previewView.dismissTransientUI()
+        externalSeriesNavigation.setVisible(false, animated: true)
     }
 
     func windowWillStartLiveResize(_ notification: Notification) {
@@ -344,7 +554,6 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         isUserLiveResizing = false
         guard let panel = window,
               card.layoutMode != .mini,
-              card.layoutMode != .fullScreen,
               let visibleFrame = (panel.screen ?? NSScreen.main)?.visibleFrame
         else { return }
         let maximumHeight = min(CardLayoutGeometry.defaultCustomHeightRange.upperBound, visibleFrame.height)
@@ -364,7 +573,6 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         case .mini: return CardLayoutGeometry.miniSize
         case .sticky: return NSSize(width: CardLayoutGeometry.stickyWidth, height: 240)
         case .middle: return NSSize(width: CardLayoutGeometry.middleWidth, height: 360)
-        case .fullScreen: return NSSize(width: 900, height: 640)
         case .custom:
             let custom = card.customLayout?.isValid == true ? card.customLayout! : .legacyDefault
             return NSSize(width: custom.width, height: custom.minimumHeight)
@@ -393,6 +601,15 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
 
         panel.onHide = { [weak self] in self?.requestHide() }
         panel.onCreateCard = { [weak self] in self?.onCreateCard?() }
+        panel.onMoveActiveCard = { [weak self] in self?.requestPresetPlacement() }
+        panel.onFoldAllCards = { [weak self] in self?.onRequestFoldAllCards?() }
+        panel.isMarkdownEditorFocused = { [weak self, weak panel] in
+            guard let self else { return false }
+            return previewView.ownsFirstResponder(in: panel)
+        }
+        panel.isMarkdownEditorComposing = { [weak self] in
+            self?.previewView.isEditorComposing == true
+        }
         panel.onApplyLayout = { [weak self] rawValue in
             guard let preset = CardLayoutPreset(rawValue: rawValue) else { return }
             self?.setLayout(preset.mode, custom: nil, animate: true)
@@ -427,6 +644,28 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         headerView.onExportMarkdown = { [weak self] in
             self?.exportMarkdown(nil)
         }
+        headerView.onTagSelectionChange = { [weak self] tag in
+            guard let self else { return }
+            activeTagID = tag?.id
+            seriesNeighbors = nil
+            updateHeader(animatedTags: true)
+            updateSeriesNavigationPresentation(animated: true)
+            if let tag {
+                onActivateTag?(card.id, tag.id)
+            }
+        }
+        headerView.onRemoveTag = { [weak self] tag in
+            guard let self else { return }
+            onRemoveTag?(card.id, tag.id)
+        }
+        headerView.onPreferredHeightChange = {
+            [weak self] oldHeight, newHeight, animated in
+            self?.handlePreferredHeaderHeightChange(
+                from: oldHeight,
+                to: newHeight,
+                animated: animated
+            )
+        }
 
         previewView.translatesAutoresizingMaskIntoConstraints = false
         previewView.onMarkdownChange = { [weak self] cardID, markdown, incomingRevision in
@@ -436,6 +675,22 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
             card.updateMarkdown(markdown, explicitTitle: nil)
             updateHeader()
             onMarkdownChange?(card.id, markdown, incomingRevision, editorSourceID)
+        }
+        previewView.onTagCommandSubmitted = {
+            [weak self] cardID, tagName, markdown, incomingRevision in
+            guard let self, cardID == card.id else { return }
+            revision = max(revision, incomingRevision)
+            if markdown != card.markdown {
+                card.updateMarkdown(markdown, explicitTitle: nil)
+                updateHeader()
+            }
+            onTagCommandSubmitted?(
+                cardID,
+                tagName,
+                markdown,
+                incomingRevision,
+                editorSourceID
+            )
         }
         previewView.onRequestHide = { [weak self] in self?.requestHide() }
         previewView.onContentHeightChange = { [weak self] cardID, height in
@@ -449,10 +704,18 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
                 animated: true
             )
         }
+        previewView.onRequestSaveAs = { [weak self] in
+            guard let self else { return }
+            onRequestSaveAs?(card.id)
+        }
 
         rootView.addSubview(headerView)
         rootView.addSubview(previewView)
         panel.contentView = rootView
+        externalSeriesNavigation.onNavigate = { [weak self] direction in
+            self?.requestSeriesNavigation(direction)
+        }
+        externalSeriesNavigation.attach(to: panel)
         synchronizeContentViewFrame()
         synchronizeWindowSurface()
 
@@ -472,16 +735,86 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         renderDocument()
     }
 
-    private func updateHeader() {
+    private func updateHeader(animatedTags: Bool? = nil) {
         headerView.update(title: card.title)
+        let currentDigest = ExternalMarkdownDocumentService.digest(Data(card.markdown.utf8))
+        headerView.updateLinkedFile(
+            fileBinding?.fileURL,
+            isDirty: fileBinding.map { $0.baseDigest != currentDigest } ?? false
+        )
+        headerView.update(
+            tags: card.tags,
+            activeTagID: activeTagID,
+            animated: animatedTags ?? window?.isVisible == true
+        )
         window?.setAccessibilityLabel(card.title.isEmpty ? "Markdown Card" : card.title)
     }
 
     private func updateLayoutPresentation() {
         let isMini = card.layoutMode == .mini
+        isUpdatingLayoutPresentation = true
         headerView.setMiniMode(isMini)
+        isUpdatingLayoutPresentation = false
+        if isMini { previewView.dismissTransientUI() }
         previewView.isHidden = isMini
         updateWindowSizingLimits()
+        updateSeriesNavigationPresentation(animated: false)
+    }
+
+    private func updateSeriesNavigationPresentation(animated: Bool) {
+        let hasActiveSeries = activeTagID.map { activeTagID in
+            card.tags.contains(where: { $0.id == activeTagID })
+        } ?? false
+        let canNavigateNewer = seriesNeighbors?.newerCardID != nil
+        let canNavigateOlder = seriesNeighbors?.olderCardID != nil
+
+        externalSeriesNavigation.update(
+            canNavigateNewer: canNavigateNewer,
+            canNavigateOlder: canNavigateOlder
+        )
+
+        let isFocused = window?.isVisible == true && window?.isKeyWindow == true
+        let shouldShowExternal = hasActiveSeries
+            && isFocused
+            && card.layoutMode != .mini
+        externalSeriesNavigation.setVisible(shouldShowExternal, animated: animated)
+        if shouldShowExternal {
+            externalSeriesNavigation.updateLayout()
+        }
+    }
+
+    private func requestSeriesNavigation(_ direction: SeriesNavigationDirection) {
+        guard let activeTagID else { return }
+        switch direction {
+        case .newer:
+            guard seriesNeighbors?.newerCardID != nil else { return }
+        case .older:
+            guard seriesNeighbors?.olderCardID != nil else { return }
+        }
+        onNavigateSeries?(card.id, activeTagID, direction)
+    }
+
+    private func handlePreferredHeaderHeightChange(
+        from oldHeight: CGFloat,
+        to newHeight: CGFloat,
+        animated: Bool
+    ) {
+        guard oldHeight != newHeight,
+              !isUpdatingLayoutPresentation,
+              !isRebindingCard,
+              card.layoutMode != .mini
+        else { return }
+        applyCurrentLayout(centered: false, animate: animated)
+        previewView.requestContentHeight()
+    }
+
+    private static func validatedActiveTagID(
+        _ requested: String?,
+        for tags: [CardTag]
+    ) -> String? {
+        requested.flatMap { candidate in
+            tags.contains(where: { $0.id == candidate }) ? candidate : nil
+        }
     }
 
     private func renderDocument() {
@@ -491,7 +824,8 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
                 markdown: card.markdown,
                 title: card.title,
                 resolvedAppearance: appearance,
-                revision: revision
+                revision: revision,
+                documentImagesAvailable: documentRootURL != nil
             )
         )
     }
@@ -507,7 +841,7 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
             )
             item.target = self
             item.tag = preset.rawValue
-            item.keyEquivalentModifierMask = [.command]
+            item.keyEquivalentModifierMask = [.control]
             item.state = card.layoutMode == preset.mode ? .on : .off
             menu.addItem(item)
         }
@@ -518,7 +852,7 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
             keyEquivalent: "5"
         )
         custom.target = self
-        custom.keyEquivalentModifierMask = [.command]
+        custom.keyEquivalentModifierMask = [.control]
         custom.state = card.layoutMode == .custom ? .on : .off
         menu.addItem(custom)
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.minY - 2), in: anchor)
@@ -561,8 +895,6 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         custom: CustomCardLayout?,
         animate: Bool
     ) {
-        let previousLayoutMode = card.layoutMode
-        let transitionAnchor = prepareLayoutTransition(from: previousLayoutMode, to: mode)
         card.layoutMode = mode
         card.customLayout = mode == .custom
             ? (custom?.isValid == true ? custom : card.customLayout ?? .legacyDefault)
@@ -570,13 +902,8 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         card.touch()
         updateLayoutPresentation()
         onLayoutChange?(card.id, card.layoutMode, card.customLayout)
-        applyCurrentLayout(
-            centered: false,
-            animate: animate,
-            anchorFrame: transitionAnchor
-        )
-        finishLayoutTransition(from: previousLayoutMode, to: mode)
-        if mode != .mini && mode != .fullScreen {
+        applyCurrentLayout(centered: false, animate: animate)
+        if mode != .mini {
             previewView.requestContentHeight()
         }
     }
@@ -584,28 +911,29 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
     private func applyCurrentLayout(
         on preferredScreen: NSScreen? = nil,
         centered: Bool,
-        animate: Bool,
-        anchorFrame: NSRect? = nil
+        animate: Bool
     ) {
         guard let panel = window,
               let visibleFrame = (preferredScreen ?? panel.screen ?? NSScreen.main)?.visibleFrame
         else { return }
 
         let frame: NSRect
-        if centered || card.layoutMode == .fullScreen {
+        if centered {
             frame = CardLayoutGeometry.centeredFrame(
                 for: card.layoutMode,
                 contentHeight: lastContentHeight,
                 custom: card.customLayout,
-                visibleFrame: visibleFrame
+                visibleFrame: visibleFrame,
+                chromeHeight: headerView.preferredHeight
             )
         } else {
             frame = CardLayoutGeometry.topAnchoredFrame(
-                from: anchorFrame ?? panel.frame,
+                from: panel.frame,
                 mode: card.layoutMode,
                 contentHeight: lastContentHeight,
                 custom: card.customLayout,
-                visibleFrame: visibleFrame
+                visibleFrame: visibleFrame,
+                chromeHeight: headerView.preferredHeight
             )
         }
         isApplyingFrame = true
@@ -614,6 +942,7 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         synchronizeContentViewFrame()
         synchronizeWindowSurface()
         isApplyingFrame = false
+        externalSeriesNavigation.updateLayout()
         scheduleFrameSave()
     }
 
@@ -661,41 +990,10 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
         panel.contentView?.superview?.displayIfNeeded()
     }
 
-    private func prepareLayoutTransition(
-        from previousMode: CardLayoutMode,
-        to nextMode: CardLayoutMode
-    ) -> NSRect? {
-        guard let panel = window else { return nil }
-        if previousMode != .fullScreen, nextMode == .fullScreen {
-            frameBeforeFullScreen = panel.frame
-            return nil
-        }
-        guard previousMode == .fullScreen, nextMode != .fullScreen else { return nil }
-        if let frameBeforeFullScreen { return frameBeforeFullScreen }
-        guard let visibleFrame = (panel.screen ?? NSScreen.main)?.visibleFrame else {
-            return panel.frame
-        }
-        return NSRect(
-            x: visibleFrame.minX,
-            y: visibleFrame.maxY - panel.frame.height,
-            width: panel.frame.width,
-            height: panel.frame.height
-        )
-    }
-
-    private func finishLayoutTransition(
-        from previousMode: CardLayoutMode,
-        to nextMode: CardLayoutMode
-    ) {
-        if previousMode == .fullScreen, nextMode != .fullScreen {
-            frameBeforeFullScreen = nil
-        }
-    }
-
     private func handleContentHeight(_ height: CGFloat) {
         guard height.isFinite, height >= 0 else { return }
         lastContentHeight = height
-        guard card.layoutMode != .mini, card.layoutMode != .fullScreen else { return }
+        guard card.layoutMode != .mini else { return }
         guard let panel = window,
               let visibleFrame = (panel.screen ?? NSScreen.main)?.visibleFrame
         else { return }
@@ -703,7 +1001,8 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
             for: card.layoutMode,
             contentHeight: height,
             custom: card.customLayout,
-            visibleFrame: visibleFrame
+            visibleFrame: visibleFrame,
+            chromeHeight: headerView.preferredHeight
         )
         guard abs(targetHeight - panel.frame.height) >= 1 else { return }
         applyCurrentLayout(centered: false, animate: false)
@@ -718,10 +1017,6 @@ final class CardPanelController: NSWindowController, NSWindowDelegate, Appearanc
             panel.minSize = NSSize(width: min(200, visibleFrame.width), height: CardHeaderView.height)
             panel.maxSize = NSSize(width: visibleFrame.width, height: CardHeaderView.height)
             panel.contentMinSize = panel.minSize
-        case .fullScreen:
-            panel.minSize = visibleFrame.size
-            panel.maxSize = visibleFrame.size
-            panel.contentMinSize = visibleFrame.size
         case .sticky, .middle, .custom:
             panel.minSize = NSSize(width: min(320, visibleFrame.width), height: min(240, visibleFrame.height))
             panel.maxSize = visibleFrame.size
@@ -906,49 +1201,89 @@ private final class CustomCardSizeViewController: NSViewController {
 }
 
 @MainActor
-private final class CommandPanel: NSPanel {
+final class CommandPanel: NSPanel {
     var onHide: (() -> Void)?
     var onCreateCard: (() -> Void)?
+    var onMoveActiveCard: (() -> Void)?
+    var onFoldAllCards: (() -> Void)?
     var onApplyLayout: ((Int) -> Void)?
     var onShowCustomLayout: (() -> Void)?
+    var isMarkdownEditorFocused: (() -> Bool)?
+    var isMarkdownEditorComposing: (() -> Bool)?
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let relevantModifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+        let modifiers = event.modifierFlags.intersection(relevantModifiers)
+        let editorFocused = isMarkdownEditorFocused?() == true
+        let editorComposing = editorFocused && isMarkdownEditorComposing?() == true
+
+        if editorFocused,
+           (MarkdownShortcutContract.matches(event)
+               || (event.keyCode == 53 && modifiers.isEmpty))
+        {
+            return super.performKeyEquivalent(with: event)
+        }
+
+        // File and layout commands are part of the card-window contract. Resolve them before
+        // configurable actions so a legacy stored Fold/Move binding can never steal Save,
+        // Save As, New/Close, or a layout shortcut.
+        if let fixedShortcut = CardWindowFixedShortcut.command(for: event) {
+            switch fixedShortcut {
+            case .newCard:
+                onCreateCard?()
+                return true
+            case .closeCard:
+                onHide?()
+                return true
+            case let .layout(rawValue):
+                guard !editorComposing else {
+                    // Consume an identified native action while IME owns the
+                    // keystroke. Passing it to AppKit could match a menu item
+                    // after the panel declined it.
+                    return true
+                }
+                onApplyLayout?(rawValue)
+                return true
+            case .customLayout:
+                guard !editorComposing else {
+                    return true
+                }
+                onShowCustomLayout?()
+                return true
+            case .openMarkdown, .quit, .save, .saveAs:
+                return super.performKeyEquivalent(with: event)
+            }
+        }
+
+        if ShortcutMatcher.matches(event, name: .toggleFoldedCards) {
+            guard !editorComposing else { return true }
+            onFoldAllCards?()
+            return true
+        }
+
+        if ShortcutMatcher.matches(event, name: .moveActiveCard) {
+            guard !editorComposing else { return true }
+            onMoveActiveCard?()
+            return true
+        }
 
         if event.keyCode == 53, modifiers.isEmpty {
             onHide?()
             return true
         }
 
-        guard modifiers.contains(.command),
-              let key = event.charactersIgnoringModifiers?.lowercased()
-        else {
-            return super.performKeyEquivalent(with: event)
-        }
-
-        switch key {
-        case "n":
-            onCreateCard?()
-            return true
-        case "w":
-            onHide?()
-            return true
-        case "1", "2", "3", "4":
-            if let raw = Int(key).map({ $0 - 1 }) { onApplyLayout?(raw) }
-            return true
-        case "5":
-            onShowCustomLayout?()
-            return true
-        default:
-            return super.performKeyEquivalent(with: event)
-        }
+        return super.performKeyEquivalent(with: event)
     }
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 {
+            if isMarkdownEditorFocused?() == true {
+                super.keyDown(with: event)
+                return
+            }
             onHide?()
             return
         }

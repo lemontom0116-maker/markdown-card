@@ -42,7 +42,9 @@
     "@tiptap/starter-kit": "3.22.3",
     "highlight.js": "11.11.1",
     "katex": "0.16.22",
-    "lowlight": "3.3.0"
+    "lowlight": "3.3.0",
+    "lucide": "0.468.0",
+    "mermaid": "11.16.0"
   },
   "devDependencies": {
     "esbuild": "^0.25.5",

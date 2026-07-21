@@ -32,7 +32,20 @@ public actor JSONCardRepository: CardRepository {
         var cards: [CardRecord]
     }
 
-    public static let currentSchemaVersion = 2
+    private struct StoreEnvelopeLayoutProbe: Decodable {
+        var cards: [CardLayoutProbe]
+    }
+
+    private struct CardLayoutProbe: Decodable {
+        var layoutMode: String?
+    }
+
+    private struct LoadedStore {
+        var cardsByID: [UUID: CardRecord]
+        var normalizedLegacyFullScreenLayout: Bool
+    }
+
+    public static let currentSchemaVersion = 3
 
     public nonisolated let fileURL: URL
     private let backupURL: URL
@@ -127,40 +140,58 @@ public actor JSONCardRepository: CardRepository {
             return
         }
 
+        let loadedStore: LoadedStore
+        let sourceWasBackup: Bool
         do {
-            cardsByID = try loadStore(at: fileURL)
-            loadedFromBackup = false
+            loadedStore = try loadStore(at: fileURL)
+            sourceWasBackup = false
         } catch {
             guard fileManager.fileExists(atPath: backupURL.path) else {
                 throw CardRepositoryError.corruptStore(error.localizedDescription)
             }
             do {
-                cardsByID = try loadStore(at: backupURL)
-                loadedFromBackup = true
+                loadedStore = try loadStore(at: backupURL)
+                sourceWasBackup = true
             } catch {
                 throw CardRepositoryError.corruptStore(error.localizedDescription)
+            }
+        }
+
+        cardsByID = loadedStore.cardsByID
+        loadedFromBackup = sourceWasBackup
+        if loadedStore.normalizedLegacyFullScreenLayout {
+            do {
+                try persist()
+            } catch {
+                cardsByID = [:]
+                loadedFromBackup = false
+                throw error
             }
         }
         isLoaded = true
     }
 
-    private func loadStore(at url: URL) throws -> [UUID: CardRecord] {
+    private func loadStore(at url: URL) throws -> LoadedStore {
         let data = try Data(contentsOf: url, options: [.mappedIfSafe])
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
         let records: [CardRecord]
-        if let envelope = try? decoder.decode(StoreEnvelope.self, from: data) {
+        let layoutProbes: [CardLayoutProbe]
+        if let envelopeProbe = try? decoder.decode(StoreEnvelopeLayoutProbe.self, from: data) {
+            let envelope = try decoder.decode(StoreEnvelope.self, from: data)
             guard envelope.schemaVersion <= Self.currentSchemaVersion else {
                 throw CardRepositoryError.corruptStore(
                     "Unsupported schema version \(envelope.schemaVersion)."
                 )
             }
             records = envelope.cards
+            layoutProbes = envelopeProbe.cards
         } else {
             // v0 development builds wrote a top-level array. Keeping this decoder makes
             // the JSON fallback safe to use while the native persistence layer evolves.
             records = try decoder.decode([CardRecord].self, from: data)
+            layoutProbes = try decoder.decode([CardLayoutProbe].self, from: data)
         }
 
         var result: [UUID: CardRecord] = [:]
@@ -173,7 +204,12 @@ public actor JSONCardRepository: CardRepository {
             }
             result[record.id] = record
         }
-        return result
+        return LoadedStore(
+            cardsByID: result,
+            normalizedLegacyFullScreenLayout: layoutProbes.contains {
+                $0.layoutMode == "fullScreen"
+            }
+        )
     }
 
     private func persist() throws {

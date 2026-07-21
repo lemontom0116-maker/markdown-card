@@ -23,6 +23,8 @@ release/
 # Design mockups and local QA artifacts
 Design/
 design-qa.md
+audit/
+.codex-tmp/
 
 # Local runtime and test data
 *.log

@@ -1,6 +1,6 @@
 import Foundation
 
-public let markdownCardProtocolVersion = 3
+public let markdownCardProtocolVersion = 5
 
 public enum CardSelector: Equatable, Sendable {
     case card(UUID)
@@ -43,10 +43,12 @@ extension CardSelector: Codable {
 public struct CreateOptions: Codable, Equatable, Sendable {
     public var markdown: String
     public var title: String?
+    public var tags: [String]
 
-    public init(markdown: String = "", title: String? = nil) {
+    public init(markdown: String = "", title: String? = nil, tags: [String] = []) {
         self.markdown = markdown
         self.title = title
+        self.tags = tags
     }
 }
 
@@ -76,6 +78,16 @@ public struct UpdateOptions: Codable, Equatable, Sendable {
     }
 }
 
+public struct TagOptions: Codable, Equatable, Sendable {
+    public var cardID: UUID
+    public var name: String
+
+    public init(cardID: UUID, name: String) {
+        self.cardID = cardID
+        self.name = name
+    }
+}
+
 public struct ListOptions: Codable, Equatable, Sendable {
     public var includeHidden: Bool
 
@@ -99,6 +111,9 @@ public enum AgentCommand: Equatable, Sendable {
     case show(ShowOptions)
     case hide(HideOptions)
     case update(UpdateOptions)
+    case tag(TagOptions)
+    case fold
+    case unfold
     case list(ListOptions)
     case delete(DeleteOptions)
     case setAppearance(AppearanceMode)
@@ -117,6 +132,9 @@ extension AgentCommand: Codable {
         case show
         case hide
         case update
+        case tag
+        case fold
+        case unfold
         case list
         case delete
         case setAppearance
@@ -134,6 +152,12 @@ extension AgentCommand: Codable {
             self = .hide(try container.decode(HideOptions.self, forKey: .options))
         case .update:
             self = .update(try container.decode(UpdateOptions.self, forKey: .options))
+        case .tag:
+            self = .tag(try container.decode(TagOptions.self, forKey: .options))
+        case .fold:
+            self = .fold
+        case .unfold:
+            self = .unfold
         case .list:
             self = .list(try container.decode(ListOptions.self, forKey: .options))
         case .delete:
@@ -160,6 +184,13 @@ extension AgentCommand: Codable {
         case let .update(options):
             try container.encode(CommandType.update, forKey: .type)
             try container.encode(options, forKey: .options)
+        case let .tag(options):
+            try container.encode(CommandType.tag, forKey: .type)
+            try container.encode(options, forKey: .options)
+        case .fold:
+            try container.encode(CommandType.fold, forKey: .type)
+        case .unfold:
+            try container.encode(CommandType.unfold, forKey: .type)
         case let .list(options):
             try container.encode(CommandType.list, forKey: .type)
             try container.encode(options, forKey: .options)

@@ -3,8 +3,16 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { JSDOM } from "jsdom";
 import { installMarkdownCard } from "../src/app.js";
-import { normalizeCodeLanguage, protectUnsafeMarkdown } from "../src/markdown.js";
 import {
+  codeBlockDisplayTitle,
+  insertSmartLinkFromPaste,
+  normalizeCodeLanguage,
+  protectUnsafeMarkdown,
+  smartLinkProviderForURL,
+  smartLinkTitleForURL
+} from "../src/markdown.js";
+import {
+  normalizeTagCommandName,
   parseYouTubeURL,
   rendererPluginRegistry,
   youtubeMarkdown
@@ -15,6 +23,7 @@ function installDOMGlobals(window) {
   globalThis.document = window.document;
   globalThis.Node = window.Node;
   globalThis.HTMLElement = window.HTMLElement;
+  globalThis.HTMLAnchorElement = window.HTMLAnchorElement;
   globalThis.Element = window.Element;
   globalThis.DocumentFragment = window.DocumentFragment;
   globalThis.MutationObserver = window.MutationObserver;
@@ -22,6 +31,11 @@ function installDOMGlobals(window) {
   globalThis.getSelection = window.getSelection.bind(window);
   globalThis.requestAnimationFrame = window.requestAnimationFrame.bind(window);
   globalThis.cancelAnimationFrame = window.cancelAnimationFrame.bind(window);
+  if (!window.document.elementFromPoint) {
+    window.document.elementFromPoint = () => (
+      window.document.querySelector(".ProseMirror") ?? window.document.body
+    );
+  }
   if (!window.Range.prototype.getClientRects) {
     window.Range.prototype.getClientRects = () => [];
   }
@@ -46,9 +60,12 @@ function makeDOM() {
   return dom;
 }
 
-function setup(payload = {}) {
+function setup(payload = {}, options = {}) {
   const dom = makeDOM();
   const messages = [];
+  if (options.nativeSlashCommandPanel) {
+    dom.window.__markdownCardNativeCapabilities = { slashCommandPanel: true };
+  }
   dom.window.webkit = {
     messageHandlers: {
       markdownCard: { postMessage: (message) => messages.push(message) }
@@ -113,7 +130,7 @@ function pasteImage(editor, name = "Screenshot.png", type = "image/png") {
   return { handled: !dispatched, prevented: event.defaultPrevented };
 }
 
-test("uses one continuous ProseMirror canvas with no block textareas", () => {
+test("uses one Rich ProseMirror canvas and one hidden Source textarea", () => {
   const { dom, api } = setup({
     markdown: "# Heading\n\nBody\n\n- one\n- two",
     revision: 1
@@ -121,7 +138,9 @@ test("uses one continuous ProseMirror canvas with no block textareas", () => {
 
   assert.equal(api.protocolVersion, 3);
   assert.equal(dom.window.document.querySelectorAll(".ProseMirror").length, 1);
-  assert.equal(dom.window.document.querySelectorAll("textarea.source-editor").length, 0);
+  const sourceEditor = dom.window.document.querySelector("textarea.source-editor");
+  assert.ok(sourceEditor);
+  assert.equal(sourceEditor.hidden, true);
   assert.equal(dom.window.document.querySelectorAll(".editor-block").length, 0);
   assert.match(dom.window.document.querySelector(".ProseMirror").innerHTML, /<h1>Heading<\/h1>/);
   assert.match(dom.window.document.querySelector(".ProseMirror").innerHTML, /<ul>/);
@@ -358,7 +377,9 @@ test("Markdown typing rules produce rich text without source blocks", () => {
 
   editor.commands.setContent("", { contentType: "markdown", emitUpdate: false });
   typeText(editor, "[Raycast](https://raycast.com)");
-  assert.match(dom.window.document.querySelector(".ProseMirror").innerHTML, /<a[^>]+href="https:\/\/raycast\.com"[^>]*>Raycast<\/a>/);
+  const raycastLink = dom.window.document.querySelector("a[href='https://raycast.com']");
+  assert.equal(raycastLink?.textContent, "Raycast");
+  assert.equal(raycastLink?.dataset.smartLinkProvider, "web");
 });
 
 test("task input requires list context and normalizes shorthand to GFM", () => {
@@ -442,6 +463,259 @@ test("task Enter and Backspace do not leave an undeletable empty row", () => {
   assert.equal(editor.getMarkdown(), "- [ ] first");
 });
 
+test("typing a bullet marker at the start of a task row converts only that row", () => {
+  const { editor } = setup({
+    markdown: "- [ ] first\n- [x] second\n- [ ] third"
+  });
+  const taskParagraphs = [];
+  editor.state.doc.descendants((node, position) => {
+    if (node.type.name === "paragraph") taskParagraphs.push(position + 1);
+  });
+  editor.commands.setTextSelection(taskParagraphs[1]);
+  typeText(editor, "- ");
+
+  assert.deepEqual(
+    editor.state.doc.content.content.map((node) => node.type.name),
+    ["taskList", "bulletList", "taskList"]
+  );
+  assert.equal(editor.state.doc.child(1).firstChild.type.name, "listItem");
+  assert.equal(editor.state.doc.child(1).textContent, "second");
+  assert.equal(editor.getMarkdown(), "- [ ] first\n\n- second\n\n- [ ] third");
+
+  const emptyRow = setup({ markdown: "- [ ] first" });
+  emptyRow.editor.commands.focus("end");
+  assert.equal(pressKey(emptyRow.editor, "Enter"), true);
+  typeText(emptyRow.editor, "- ");
+  assert.deepEqual(
+    emptyRow.editor.state.doc.content.content.map((node) => node.type.name),
+    ["taskList", "bulletList"]
+  );
+  assert.equal(emptyRow.editor.state.doc.lastChild.textContent, "");
+});
+
+test("bullet markers convert a nested task in place without detaching its checked parent", () => {
+  for (const marker of ["- ", "+ ", "* "]) {
+    const { editor } = setup({ markdown: "- [x] parent" });
+    editor.commands.focus("end");
+    assert.equal(pressKey(editor, "Enter"), true);
+    assert.equal(pressKey(editor, "Tab"), true);
+
+    let parent = editor.state.doc.firstChild.firstChild;
+    assert.equal(parent.attrs.checked, true);
+    assert.equal(parent.child(1).type.name, "taskList");
+
+    typeText(editor, marker);
+    parent = editor.state.doc.firstChild.firstChild;
+    assert.equal(editor.state.doc.childCount, 1, marker);
+    assert.equal(editor.state.doc.firstChild.type.name, "taskList", marker);
+    assert.equal(editor.state.doc.firstChild.childCount, 1, marker);
+    assert.equal(parent.type.name, "taskItem", marker);
+    assert.equal(parent.attrs.checked, true, marker);
+    assert.equal(parent.child(1).type.name, "bulletList", marker);
+    assert.equal(parent.child(1).firstChild.type.name, "listItem", marker);
+
+    typeText(editor, "child note");
+    assert.equal(editor.getMarkdown(), "- [x] parent\n  - child note", marker);
+  }
+
+  const history = setup({ markdown: "- [x] parent\n  - [ ] " }).editor;
+  history.commands.focus("end");
+  typeText(history, "- ");
+  assert.equal(history.getMarkdown(), "- [x] parent\n  - ");
+  assert.equal(history.commands.undo(), true);
+  assert.equal(history.getMarkdown(), "- [x] parent\n  - [ ] ");
+  assert.equal(history.state.doc.firstChild.firstChild.attrs.checked, true);
+  assert.equal(history.commands.redo(), true);
+  assert.equal(history.getMarkdown(), "- [x] parent\n  - ");
+});
+
+test("Backspace removes a new child checkbox in place before deleting the empty bullet", () => {
+  const { editor } = setup({ markdown: "- [x] parent" });
+  editor.commands.focus("end");
+  assert.equal(pressKey(editor, "Enter"), true);
+  assert.equal(pressKey(editor, "Tab"), true);
+  const nestedMarkdown = editor.getMarkdown();
+  assert.equal(nestedMarkdown, "- [x] parent\n  - [ ] ");
+
+  assert.equal(pressKey(editor, "Backspace"), true);
+  assert.equal(editor.getMarkdown(), "- [x] parent\n  - ");
+  assert.equal(editor.state.doc.firstChild.firstChild.attrs.checked, true);
+  assert.equal(editor.state.doc.firstChild.firstChild.child(1).type.name, "bulletList");
+
+  assert.equal(pressKey(editor, "Backspace"), true);
+  assert.equal(editor.getMarkdown(), "- [x] parent");
+  assert.equal(editor.state.doc.firstChild.firstChild.attrs.checked, true);
+  assert.equal(editor.state.doc.firstChild.firstChild.childCount, 1);
+
+  const history = setup({ markdown: nestedMarkdown }).editor;
+  history.commands.focus("end");
+  assert.equal(pressKey(history, "Backspace"), true);
+  assert.equal(history.getMarkdown(), "- [x] parent\n  - ");
+  assert.equal(history.commands.undo(), true);
+  assert.equal(history.getMarkdown(), nestedMarkdown);
+  assert.equal(history.state.doc.firstChild.firstChild.attrs.checked, true);
+  assert.equal(history.commands.redo(), true);
+  assert.equal(history.getMarkdown(), "- [x] parent\n  - ");
+});
+
+test("Backspace deletes only the empty nested bullet and preserves the parent checkbox state", () => {
+  const cases = [
+    { checked: false, children: ["only"], target: 0 },
+    { checked: true, children: ["first", "second", "third"], target: 0 },
+    { checked: true, children: ["first", "second", "third"], target: 1 }
+  ];
+
+  for (const { checked, children, target } of cases) {
+    const markdown = [
+      `- [${checked ? "x" : " "}] parent`,
+      ...children.map((child) => `  - ${child}`)
+    ].join("\n");
+    const { editor } = setup({ markdown });
+    const paragraphs = [];
+    editor.state.doc.descendants((node, position) => {
+      if (node.type.name === "paragraph") {
+        paragraphs.push({ position: position + 1, size: node.content.size });
+      }
+    });
+    const child = paragraphs[target + 1];
+    editor.commands.setTextSelection({
+      from: child.position,
+      to: child.position + child.size
+    });
+    editor.commands.deleteSelection();
+
+    assert.equal(pressKey(editor, "Backspace"), true);
+    let parent = editor.state.doc.firstChild.firstChild;
+    assert.equal(editor.state.doc.firstChild.type.name, "taskList");
+    assert.equal(parent.type.name, "taskItem");
+    assert.equal(parent.attrs.checked, checked);
+    const remaining = children.filter((_value, index) => index !== target);
+    if (remaining.length === 0) {
+      assert.equal(parent.childCount, 1);
+    } else {
+      assert.equal(parent.child(1).type.name, "bulletList");
+      assert.deepEqual(
+        Array.from(parent.child(1).content.content, (item) => item.textContent),
+        remaining
+      );
+    }
+
+    assert.equal(editor.commands.undo(), true);
+    parent = editor.state.doc.firstChild.firstChild;
+    assert.equal(parent.attrs.checked, checked);
+    assert.equal(parent.child(1).type.name, "bulletList");
+    assert.equal(parent.child(1).childCount, children.length);
+    assert.equal(editor.commands.redo(), true);
+    parent = editor.state.doc.firstChild.firstChild;
+    assert.equal(parent.attrs.checked, checked);
+    assert.equal(parent.childCount, remaining.length === 0 ? 1 : 2);
+  }
+});
+
+test("task items preserve nested bullet lists through GFM import and serialization", () => {
+  const markdown = "- [ ] parent task\n  - child note\n  - another note\n- [x] next task";
+  const { editor } = setup({ markdown });
+  const taskList = editor.state.doc.firstChild;
+  const parentTask = taskList.firstChild;
+
+  assert.equal(taskList.type.name, "taskList");
+  assert.equal(parentTask.type.name, "taskItem");
+  assert.equal(parentTask.child(1).type.name, "bulletList");
+  assert.equal(parentTask.child(1).childCount, 2);
+  assert.equal(editor.getMarkdown(), markdown);
+});
+
+test("Tab moves an adjacent bullet under the previous task with one-step undo", () => {
+  const original = "- [ ] parent task\n\n- child note\n- another note";
+  const nested = "- [ ] parent task\n  - child note\n\n- another note";
+  const { editor } = setup({ markdown: original });
+  const paragraphs = [];
+  editor.state.doc.descendants((node, position) => {
+    if (node.type.name === "paragraph") paragraphs.push(position + 1);
+  });
+  editor.commands.setTextSelection(paragraphs[1]);
+
+  assert.equal(pressKey(editor, "Tab"), true);
+  const parentTask = editor.state.doc.firstChild.firstChild;
+  assert.equal(parentTask.type.name, "taskItem");
+  assert.equal(parentTask.child(1).type.name, "bulletList");
+  assert.equal(parentTask.child(1).firstChild.type.name, "listItem");
+  assert.equal(parentTask.child(1).textContent, "child note");
+  assert.equal(editor.getMarkdown(), nested);
+
+  assert.equal(editor.commands.undo(), true);
+  assert.equal(editor.getMarkdown(), original);
+  assert.equal(editor.commands.redo(), true);
+  assert.equal(editor.getMarkdown(), nested);
+
+  assert.equal(pressKey(editor, "Tab", { shiftKey: true }), true);
+  assert.equal(editor.getMarkdown(), original);
+});
+
+test("task Enter, bullet typing, and Tab build a portable nested note", () => {
+  const { editor } = setup();
+  typeText(editor, "- [] parent task");
+  assert.equal(pressKey(editor, "Enter"), true);
+  typeText(editor, "- ");
+  assert.deepEqual(
+    editor.state.doc.content.content.map((node) => node.type.name),
+    ["taskList", "bulletList"]
+  );
+
+  assert.equal(pressKey(editor, "Tab"), true);
+  typeText(editor, "child note");
+  assert.equal(editor.getMarkdown(), "- [ ] parent task\n  - child note");
+});
+
+test("Tab appends the first adjacent bullet to the last task's existing notes", () => {
+  const original = [
+    "- [ ] first task",
+    "- [x] second task",
+    "  - existing note",
+    "",
+    "- moved note",
+    "- stays outside"
+  ].join("\n");
+  const nested = [
+    "- [ ] first task",
+    "- [x] second task",
+    "  - existing note",
+    "  - moved note",
+    "",
+    "- stays outside"
+  ].join("\n");
+  const { editor } = setup({ markdown: original });
+  const paragraphs = [];
+  editor.state.doc.descendants((node, position) => {
+    if (node.type.name === "paragraph") paragraphs.push(position + 1);
+  });
+  editor.commands.setTextSelection(paragraphs[3]);
+
+  assert.equal(pressKey(editor, "Tab"), true);
+  const lastTask = editor.state.doc.firstChild.lastChild;
+  assert.equal(lastTask.lastChild.type.name, "bulletList");
+  assert.equal(lastTask.lastChild.childCount, 2);
+  assert.equal(editor.getMarkdown(), nested);
+
+  assert.equal(pressKey(editor, "Tab", { shiftKey: true }), true);
+  assert.equal(editor.getMarkdown(), original);
+});
+
+test("task and bullet keyboard shortcuts convert in both directions", () => {
+  const { editor } = setup({ markdown: "- [ ] keep me" });
+  editor.commands.focus("end");
+
+  assert.equal(pressKey(editor, "8", { metaKey: true, shiftKey: true }), true);
+  assert.equal(editor.state.doc.firstChild.type.name, "bulletList");
+  assert.equal(editor.state.doc.firstChild.firstChild.type.name, "listItem");
+  assert.equal(editor.getMarkdown(), "- keep me");
+
+  assert.equal(pressKey(editor, "9", { metaKey: true, shiftKey: true }), true);
+  assert.equal(editor.state.doc.firstChild.type.name, "taskList");
+  assert.equal(editor.state.doc.firstChild.firstChild.type.name, "taskItem");
+  assert.equal(editor.getMarkdown(), "- [ ] keep me");
+});
+
 test("content height measurement never mutates task content or selection", () => {
   const { api, editor, messages } = setup({ markdown: "- [ ] one\n- [x] two" });
   editor.commands.setTextSelection(5);
@@ -494,13 +768,15 @@ test("Tab indents code and lists without trapping ordinary paragraphs", () => {
   assert.equal(paragraph.editor.getMarkdown(), "Body");
 });
 
-test("language fences normalize aliases, highlight known languages, and preserve unknown languages", () => {
+test("language fences normalize aliases for highlighting while preserving source info strings", () => {
   assert.equal(normalizeCodeLanguage("python3"), "python");
   assert.equal(normalizeCodeLanguage("C++"), "cpp");
   assert.equal(normalizeCodeLanguage("zsh"), "bash");
+  assert.equal(codeBlockDisplayTitle('python3 title="attention.py"'), "attention.py");
+  assert.equal(codeBlockDisplayTitle("python title='attention graph.py'"), "attention graph.py");
   const { dom, editor } = setup({
     markdown: [
-      "```python3", "def answer():", "    return 42", "```", "",
+      '```python3 title="attention.py"', "def answer():", "    return 42", "```", "",
       "```c++", "int main() { return 0; }", "```", "",
       "```mystery", "opaque token", "```"
     ].join("\n")
@@ -508,11 +784,14 @@ test("language fences normalize aliases, highlight known languages, and preserve
   const python = dom.window.document.querySelector("code.language-python");
   const cpp = dom.window.document.querySelector("code.language-cpp");
   const unknown = dom.window.document.querySelector("code.language-mystery");
+  const titled = python.closest("pre");
   assert.ok(python.querySelector(".hljs-keyword"));
   assert.ok(cpp.querySelector(".hljs-type, .hljs-keyword"));
   assert.equal(unknown.querySelector("span"), null);
-  assert.match(editor.getMarkdown(), /```python\n/);
-  assert.match(editor.getMarkdown(), /```cpp\n/);
+  assert.equal(titled.dataset.codeTitle, "attention.py");
+  assert.match(titled.getAttribute("aria-label"), /^attention\.py, python code block\./u);
+  assert.match(editor.getMarkdown(), /```python3 title="attention\.py"\n/);
+  assert.match(editor.getMarkdown(), /```c\+\+\n/);
   assert.match(editor.getMarkdown(), /```mystery\n/);
 
   editor.commands.setContent("", { contentType: "markdown", emitUpdate: false });
@@ -521,12 +800,14 @@ test("language fences normalize aliases, highlight known languages, and preserve
   assert.equal(editor.state.doc.firstChild.attrs.language, "python");
 });
 
-test("empty cards have a caret surface without placeholder copy", () => {
-  const { dom } = setup();
+test("empty cards show command discovery without serializing placeholder copy", () => {
+  const { dom, api, editor } = setup();
   const canvas = dom.window.document.querySelector(".ProseMirror");
+  const placeholder = canvas.querySelector("[data-placeholder]");
   assert.equal(canvas.textContent, "");
-  assert.equal(canvas.querySelector("[data-placeholder]"), null);
-  assert.doesNotMatch(canvas.innerHTML, /Write Markdown/i);
+  assert.equal(placeholder?.dataset.placeholder, "Start writing… Type / for commands");
+  assert.equal(api.getState().markdown, "");
+  assert.equal(editor.getMarkdown(), "");
 });
 
 test("revisioned transactions serialize Markdown and undo/redo without rebuilding the canvas", () => {
@@ -586,25 +867,569 @@ test("same-card external updates preserve scroll and selection; new cards reset 
   assert.equal(root.scrollTop, 0);
 });
 
-test("links open only on Command-click through the native bridge", () => {
-  const { dom, messages } = setup({ markdown: "[Open](https://example.com/path)" });
-  const link = dom.window.document.querySelector("a");
-  link.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
-  assert.notEqual(messages.at(-1)?.type, "openExternalLink");
+test("switching cards resets undo history instead of restoring the previous card", () => {
+  const { api, editor, messages } = setup({ markdown: "# Source", revision: 1 });
+  editor.commands.focus("end");
+  editor.commands.insertContent(" edited");
 
+  api.render({ cardID: "card-two", markdown: "# Target", revision: 4 });
+  const messageCount = messages.length;
+
+  assert.equal(editor.commands.undo(), false);
+  assert.equal(api.getState().markdown, "# Target");
+  assert.equal(api.getState().revision, 4);
+  assert.equal(messages.length, messageCount);
+  assert.equal(messages.some((message) => (
+    message.type === "markdownChanged"
+      && message.cardID === "card-two"
+      && message.markdown.includes("Source")
+  )), false);
+});
+
+test("external links open once on primary click, Command-click, and keyboard activation", () => {
+  const { dom, messages } = setup({
+    markdown: "[Web](https://example.com/path) [Mail](mailto:hello@example.com)"
+  });
+  const web = dom.window.document.querySelector("a[href='https://example.com/path']");
+  const mail = dom.window.document.querySelector("a[href='mailto:hello@example.com']");
+
+  assert.equal(web.dispatchEvent(new dom.window.MouseEvent("click", {
+    bubbles: true,
+    cancelable: true,
+    button: 0
+  })), false);
+  assert.deepEqual(messages.filter((message) => message.type === "openExternalLink"), [{
+    type: "openExternalLink",
+    url: "https://example.com/path"
+  }]);
+
+  web.dispatchEvent(new dom.window.MouseEvent("click", {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    metaKey: true
+  }));
+  mail.dispatchEvent(new dom.window.MouseEvent("click", {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    detail: 0
+  }));
+  assert.deepEqual(messages.filter((message) => message.type === "openExternalLink"), [
+    { type: "openExternalLink", url: "https://example.com/path" },
+    { type: "openExternalLink", url: "https://example.com/path" },
+    { type: "openExternalLink", url: "mailto:hello@example.com" }
+  ]);
+
+  for (const options of [
+    { button: 0, ctrlKey: true },
+    { button: 0, shiftKey: true },
+    { button: 1 },
+    { button: 2 }
+  ]) {
+    assert.equal(web.dispatchEvent(new dom.window.MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      ...options
+    })), true);
+  }
+  assert.equal(messages.filter((message) => message.type === "openExternalLink").length, 3);
+});
+
+test("dragging a link does not accidentally open it", () => {
+  const { dom, messages } = setup({ markdown: "[Drag me](https://example.com/path)" });
+  const link = dom.window.document.querySelector("a");
+  link.dispatchEvent(new dom.window.MouseEvent("mousedown", {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    clientX: 4,
+    clientY: 4
+  }));
+  link.dispatchEvent(new dom.window.MouseEvent("mousemove", {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    clientX: 12,
+    clientY: 4
+  }));
+  link.dispatchEvent(new dom.window.MouseEvent("mouseup", {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    clientX: 12,
+    clientY: 4
+  }));
   link.dispatchEvent(new dom.window.MouseEvent("click", {
     bubbles: true,
     cancelable: true,
-    metaKey: true
+    button: 0,
+    clientX: 12,
+    clientY: 4
   }));
-  assert.deepEqual(messages.at(-1), {
+  assert.equal(messages.some((message) => message.type === "openExternalLink"), false);
+});
+
+test("hovering an external link for one second opens the existing editor without stealing focus", async () => {
+  const url = "https://example.com/same";
+  const markdown = `[First](${url}) and [Second](${url})`;
+  const { dom, editor } = setup({ markdown, revision: 1 });
+  const links = [...dom.window.document.querySelectorAll("a[href]")];
+  const secondLink = links[1];
+  const popover = dom.window.document.querySelector(".link-editor-popover");
+  const textInput = popover.querySelector("input[name='text']");
+  const urlInput = popover.querySelector("input[name='url']");
+  const activeElement = dom.window.document.activeElement;
+
+  secondLink.dispatchEvent(new dom.window.MouseEvent("mouseover", {
+    bubbles: true,
+    relatedTarget: dom.window.document.body
+  }));
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 250));
+  assert.equal(popover.hidden, true);
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 850));
+
+  assert.equal(popover.hidden, false);
+  assert.equal(popover.dataset.openedBy, "hover");
+  assert.equal(textInput.value, "Second");
+  assert.equal(urlInput.value, url);
+  assert.equal(dom.window.document.activeElement, activeElement);
+
+  textInput.value = "Updated";
+  textInput.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+  secondLink.dispatchEvent(new dom.window.MouseEvent("mouseout", {
+    bubbles: true,
+    relatedTarget: popover
+  }));
+  popover.dispatchEvent(new dom.window.MouseEvent("mouseleave", {
+    relatedTarget: dom.window.document.body
+  }));
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 220));
+  assert.equal(popover.hidden, false);
+
+  popover.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true }));
+  assert.equal(editor.getMarkdown(), `[First](${url}) and [Updated](${url})`);
+  assert.equal(popover.hidden, true);
+  assert.equal(editor.commands.undo(), true);
+  assert.equal(editor.getMarkdown(), markdown);
+});
+
+test("smart links classify exact platform hosts and derive offline titles", () => {
+  const providers = new Map([
+    ["https://support.apple.com/en-us/HT213650", "apple"],
+    ["https://github.com/example/project", "github"],
+    ["https://gist.github.com/example/abc123", "github"],
+    ["https://huggingface.co/Qwen/Qwen3-8B", "huggingface"],
+    ["https://zhuanlan.zhihu.com/p/123456", "zhihu"],
+    ["https://www.xiaohongshu.com/explore/abc123", "xiaohongshu"],
+    ["https://x.com/example/status/123", "x"],
+    ["https://mobile.twitter.com/example/status/123", "x"],
+    ["https://www.figma.com/design/example/file", "figma"],
+    ["https://linear.app/example/issue/MC-7", "linear"],
+    ["https://example.notion.site/Notes-123", "notion"],
+    ["https://workspace.slack.com/archives/C123", "slack"],
+    ["https://mail.google.com/mail/u/0/", "gmail"],
+    ["https://calendar.google.com/calendar/u/0/r", "googlecalendar"],
+    ["https://drive.google.com/file/d/123/view", "googledrive"],
+    ["https://docs.google.com/document/d/123/edit", "googledocs"],
+    ["https://docs.google.com/spreadsheets/d/123/edit", "googlesheets"],
+    ["https://docs.google.com/presentation/d/123/edit", "googleslides"],
+    ["https://gitlab.com/example/project", "gitlab"],
+    ["https://export.arxiv.org/abs/2401.01234", "arxiv"],
+    ["https://openreview.net/forum?id=abc123", "openreview"],
+    ["https://doi.org/10.1145/123", "doi"],
+    ["https://paperswithcode.com/paper/example", "paperswithcode"],
+    ["https://www.kaggle.com/competitions/example", "kaggle"],
+    ["https://platform.openai.com/docs", "openai"],
+    ["https://colab.research.google.com/drive/123", "googlecolab"],
+    ["https://www.youtube.com/watch?v=dQw4w9WgXcQ", "youtube"],
+    ["https://www.bilibili.com/video/BV1xx411c7mD", "bilibili"],
+    ["https://example.com/guide", "web"],
+    ["https://github.com.evil.test/example/project", "web"]
+  ]);
+  for (const [url, provider] of providers) {
+    assert.equal(smartLinkProviderForURL(url)?.id, provider);
+  }
+
+  for (const rejected of [
+    "https://github.com@evil.test/example/project",
+    "javascript:https://github.com/example/project",
+    "mailto:hello@github.com"
+  ]) {
+    assert.equal(smartLinkProviderForURL(rejected), null);
+  }
+
+  assert.equal(
+    smartLinkTitleForURL("https://github.com/example/project/issues/42"),
+    "example/project · Issue #42"
+  );
+  assert.equal(
+    smartLinkTitleForURL("https://huggingface.co/datasets/example/corpus"),
+    "example/corpus · Dataset"
+  );
+  assert.equal(
+    smartLinkTitleForURL("https://x.com/example/status/123"),
+    "@example · Post"
+  );
+  assert.equal(
+    smartLinkTitleForURL("https://www.zhihu.com/question/123456"),
+    "知乎问题 #123456"
+  );
+  assert.equal(
+    smartLinkTitleForURL("https://arxiv.org/pdf/2401.01234.pdf"),
+    "arXiv · 2401.01234"
+  );
+  assert.equal(
+    smartLinkTitleForURL("https://openreview.net/forum?id=abc123"),
+    "OpenReview · abc123"
+  );
+  assert.equal(smartLinkTitleForURL("https://www.example.com/guide"), "example.com");
+  assert.equal(
+    smartLinkTitleForURL("https://github.com/%0Aevil/%E2%80%AErepo"),
+    "evil/repo"
+  );
+  const boundedTitle = smartLinkTitleForURL(`https://github.com/${"a".repeat(500)}/repo`);
+  assert.ok([...boundedTitle].length <= 120);
+  assert.doesNotMatch(boundedTitle, /[\u0000-\u001f\u007f-\u009f\u202a-\u202e]/u);
+});
+
+test("only standalone external links show local icons and preserve Markdown bytes", () => {
+  const markdown = [
+    "[Markdown Card](https://github.com/example/markdown-card)",
+    "",
+    "正文中的 [GitHub](https://github.com/) 应保持普通内联样式。",
+    "",
+    "[Qwen 模型](https://huggingface.co/Qwen/Qwen3-8B \"Model\")",
+    "",
+    "[伪装链接](https://github.com.evil.test/example)"
+  ].join("\n");
+  const { dom, api, editor, messages } = setup({ markdown, revision: 1 });
+  const blocks = [...dom.window.document.querySelectorAll("p.smart-link-block")];
+
+  assert.equal(blocks.length, 3);
+  assert.deepEqual(
+    blocks.map((block) => block.dataset.smartLinkProvider),
+    ["github", "huggingface", "web"]
+  );
+  const githubLink = blocks[0].querySelector("a.smart-link");
+  assert.equal(githubLink?.dataset.smartLinkProvider, "github");
+  assert.equal(githubLink?.querySelector(".smart-link-icon")?.getAttribute("aria-hidden"), "true");
+  assert.equal(githubLink?.querySelector(".smart-link-icon")?.getAttribute("draggable"), "false");
+  assert.equal(githubLink?.querySelector(".smart-link-icon")?.dataset.markdownCopy, "exclude");
+  assert.equal(githubLink?.querySelector(".smart-link-icon svg")?.getAttribute("focusable"), "false");
+  assert.equal(githubLink?.querySelector(".smart-link-title")?.textContent, "Markdown Card");
+  assert.equal(
+    dom.window.document.querySelector("a[href='https://github.com/']")
+      ?.closest("p")?.classList.contains("smart-link-block"),
+    false
+  );
+  assert.equal(
+    dom.window.document.querySelector("a[href='https://github.com.evil.test/example']")
+      ?.classList.contains("smart-link"),
+    true
+  );
+  assert.equal(
+    dom.window.document.querySelector("a[href='https://github.com.evil.test/example']")
+      ?.closest("p")?.dataset.smartLinkProvider,
+    "web"
+  );
+  assert.equal(editor.getMarkdown(), markdown);
+  assert.equal(api.getMarkdownForCopy(), markdown);
+  assert.equal(api.getMarkdownExportBundle().markdown, markdown);
+  assert.doesNotMatch(api.getMarkdownForCopy(), /smart-link|🤗|𝕏/u);
+
+  editor.commands.setTextSelection(1);
+  githubLink.querySelector(".smart-link-icon").dispatchEvent(new dom.window.MouseEvent("click", {
+    bubbles: true,
+    cancelable: true,
+    button: 0
+  }));
+  assert.deepEqual(messages.filter((message) => message.type === "openExternalLink"), [{
     type: "openExternalLink",
-    url: "https://example.com/path"
+    url: "https://github.com/example/markdown-card"
+  }]);
+});
+
+test("smart-link icon styling stays compact, local, and non-circular", async () => {
+  const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+  const linkRule = css.match(/\.smart-link-block \.smart-link\s*\{([\s\S]*?)\}/u)?.[1] ?? "";
+  const titleRule = css.match(/\.smart-link-block \.smart-link-title\s*\{([\s\S]*?)\}/u)?.[1] ?? "";
+  const iconRule = css.match(/\.smart-link-block \.smart-link-icon\s*\{([\s\S]*?)\}/u)?.[1] ?? "";
+  const iconSource = await readFile(new URL("../src/smart-link-icons.js", import.meta.url), "utf8");
+
+  assert.match(linkRule, /align-items:\s*flex-start/u);
+  assert.match(linkRule, /line-height:\s*1\.35/u);
+  assert.match(titleRule, /line-height:\s*inherit/u);
+  assert.match(titleRule, /overflow-wrap:\s*anywhere/u);
+  assert.doesNotMatch(titleRule, /padding-(?:block-)?top/u);
+  assert.match(iconRule, /width:\s*16px/u);
+  assert.match(iconRule, /height:\s*16px/u);
+  assert.match(iconRule, /flex:\s*0\s+0\s+16px/u);
+  assert.match(iconRule, /margin-block-start:\s*0\.175em/u);
+  assert.match(iconRule, /padding:\s*var\(--smart-link-icon-inset,\s*2px\)/u);
+  assert.match(
+    iconRule,
+    /background-color:\s*var\(--smart-link-brand-color,\s*#667085\)/u
+  );
+  assert.match(
+    iconRule,
+    /color:\s*var\(--smart-link-brand-foreground,\s*#ffffff\)/u
+  );
+  assert.match(
+    iconRule,
+    /box-shadow:\s*inset 0 0 0 1px var\(--smart-link-tile-outline,\s*transparent\)/u
+  );
+  assert.match(iconRule, /line-height:\s*0/u);
+  assert.match(iconRule, /opacity:\s*1/u);
+  assert.doesNotMatch(iconRule, /border-radius:\s*50%/u);
+  assert.doesNotMatch(iconRule, /color-mix/u);
+  assert.doesNotMatch(iconSource, /["']mark["']/u);
+  assert.deepEqual(
+    [...iconSource.matchAll(/https?:\/\/[^"']+/gu)].map((match) => match[0]),
+    ["http://www.w3.org/2000/svg"]
+  );
+  assert.doesNotMatch(iconSource, /\bfetch\s*\(|XMLHttpRequest|createElement\(["']img["']/u);
+
+  const xiaohongshu = setup({
+    markdown: "[小红书笔记](https://www.xiaohongshu.com/explore/abc123)"
   });
+  const icon = xiaohongshu.dom.window.document.querySelector(".smart-link-icon");
+  assert.equal(icon?.dataset.iconPresentation, "tile");
+  assert.equal(icon?.style.getPropertyValue("--smart-link-brand-color"), "#FF2442");
+  assert.equal(icon?.style.getPropertyValue("--smart-link-brand-foreground"), "#FFFFFF");
+  assert.equal(icon?.style.getPropertyValue("--smart-link-icon-inset"), "1px");
+  assert.doesNotMatch(iconSource, /contrastingForeground|#171717/u);
+});
+
+test("every smart-link provider uses a solid icon tile with high-contrast geometry", () => {
+  const examples = new Map([
+    ["apple", "https://support.apple.com/en-us/HT213650"],
+    ["github", "https://github.com/example/project"],
+    ["huggingface", "https://huggingface.co/Qwen/Qwen3-8B"],
+    ["zhihu", "https://www.zhihu.com/question/123456"],
+    ["xiaohongshu", "https://www.xiaohongshu.com/explore/abc123"],
+    ["x", "https://x.com/example/status/123"],
+    ["figma", "https://www.figma.com/design/example/file"],
+    ["linear", "https://linear.app/example/issue/MC-7"],
+    ["notion", "https://example.notion.site/Notes-123"],
+    ["slack", "https://workspace.slack.com/archives/C123"],
+    ["gmail", "https://mail.google.com/mail/u/0/"],
+    ["googlecalendar", "https://calendar.google.com/calendar/u/0/r"],
+    ["googledrive", "https://drive.google.com/file/d/123/view"],
+    ["googledocs", "https://docs.google.com/document/d/123/edit"],
+    ["googlesheets", "https://docs.google.com/spreadsheets/d/123/edit"],
+    ["googleslides", "https://docs.google.com/presentation/d/123/edit"],
+    ["gitlab", "https://gitlab.com/example/project"],
+    ["arxiv", "https://arxiv.org/abs/2401.01234"],
+    ["openreview", "https://openreview.net/forum?id=abc123"],
+    ["doi", "https://doi.org/10.1145/123"],
+    ["paperswithcode", "https://paperswithcode.com/paper/example"],
+    ["kaggle", "https://www.kaggle.com/competitions/example"],
+    ["openai", "https://platform.openai.com/docs"],
+    ["googlecolab", "https://colab.research.google.com/drive/123"],
+    ["youtube", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+    ["bilibili", "https://www.bilibili.com/video/BV1xx411c7mD"],
+    ["web", "https://example.com/guide"]
+  ]);
+  const expectedPalette = new Map([
+    ["apple", ["#147EFB", "#FFFFFF"]],
+    ["github", ["#000000", "#FFFFFF"]],
+    ["huggingface", ["#FFFFFF", "#3A3B45"]],
+    ["zhihu", ["#0084FF", "#FFFFFF"]],
+    ["xiaohongshu", ["#FF2442", "#FFFFFF"]],
+    ["x", ["#5F6F7A", "#FFFFFF"]],
+    ["figma", ["#D83B16", "#FFFFFF"]],
+    ["linear", ["#5E6AD2", "#FFFFFF"]],
+    ["notion", ["#F7F7F5", "#111111"]],
+    ["slack", ["#4A154B", "#FFFFFF"]],
+    ["gmail", ["#EA4335", "#FFFFFF"]],
+    ["googlecalendar", ["#1967D2", "#FFFFFF"]],
+    ["googledrive", ["#1769AA", "#FFFFFF"]],
+    ["googledocs", ["#1967D2", "#FFFFFF"]],
+    ["googlesheets", ["#137333", "#FFFFFF"]],
+    ["googleslides", ["#9A5B00", "#FFFFFF"]],
+    ["gitlab", ["#B63B0B", "#FFFFFF"]],
+    ["arxiv", ["#B31B1B", "#FFFFFF"]],
+    ["openreview", ["#176B87", "#FFFFFF"]],
+    ["doi", ["#4A3500", "#FAB70C"]],
+    ["paperswithcode", ["#087F8C", "#FFFFFF"]],
+    ["kaggle", ["#0077A8", "#FFFFFF"]],
+    ["openai", ["#0B7F62", "#FFFFFF"]],
+    ["googlecolab", ["#B85C00", "#FFFFFF"]],
+    ["youtube", ["#FF0000", "#FFFFFF"]],
+    ["bilibili", ["#007AA3", "#FFFFFF"]],
+    ["web", ["#667085", "#FFFFFF"]]
+  ]);
+  const luminance = (color) => {
+    const channels = color.slice(1).match(/.{2}/gu).map(
+      (channel) => Number.parseInt(channel, 16) / 255
+    );
+    return channels.reduce((sum, channel, index) => {
+      const linear = channel <= 0.04045
+        ? channel / 12.92
+        : ((channel + 0.055) / 1.055) ** 2.4;
+      return sum + linear * [0.2126, 0.7152, 0.0722][index];
+    }, 0);
+  };
+  const contrastRatio = (first, second) => {
+    const values = [luminance(first), luminance(second)].sort((left, right) => right - left);
+    return (values[0] + 0.05) / (values[1] + 0.05);
+  };
+
+  for (const [provider, url] of examples) {
+    const { dom } = setup({ markdown: `[Link](${url})` });
+    const icon = dom.window.document.querySelector(".smart-link-icon");
+    assert.ok(icon, `${provider} should render a local icon`);
+    assert.equal(
+      icon.dataset.iconPresentation,
+      provider === "web" ? "generic" : "tile",
+      `${provider} should not use a transparent mark presentation`
+    );
+    const background = icon.style.getPropertyValue("--smart-link-brand-color");
+    const foreground = icon.style.getPropertyValue("--smart-link-brand-foreground");
+    assert.deepEqual(
+      [background, foreground],
+      expectedPalette.get(provider),
+      `${provider} should use its theme-independent palette`
+    );
+    assert.match(background, /^#[\dA-F]{6}$/iu, `${provider} needs a solid background`);
+    assert.match(foreground, /^#[\dA-F]{6}$/iu, `${provider} needs a solid foreground`);
+    if (provider !== "github") {
+      assert.notEqual(background.toUpperCase(), "#000000", `${provider} must not use a black tile`);
+    }
+    assert.ok(
+      contrastRatio(background, foreground) >= 3,
+      `${provider} icon geometry should have at least 3:1 contrast`
+    );
+    if (provider === "huggingface") {
+      assert.equal(background, "#FFFFFF");
+      assert.equal(foreground, "#3A3B45");
+      assert.equal(icon.style.getPropertyValue("--smart-link-icon-inset"), "1px");
+      assert.equal(icon.querySelector("svg")?.getAttribute("viewBox"), "0 0 95 88");
+      assert.deepEqual(
+        [...icon.querySelectorAll("svg path")].map((path) => path.getAttribute("fill")),
+        ["#FFD21E", "#FF9D0B", "#3A3B45", "#FF323D", "#3A3B45", "#FF9D0B", "#FFD21E", "#FF9D0B", "#FFD21E"]
+      );
+    }
+    if (provider === "github") {
+      assert.equal(background, "#000000");
+      assert.equal(foreground, "#FFFFFF");
+      assert.equal(icon.querySelector("svg")?.getAttribute("viewBox"), "0 0 24 24");
+      assert.match(
+        icon.querySelector("svg path")?.getAttribute("d") ?? "",
+        /^M10\.226 17\.284/u
+      );
+    }
+    if (provider === "notion") {
+      assert.equal(icon.style.getPropertyValue("--smart-link-tile-outline"), "#D4D4D0");
+    }
+    assert.ok(icon.querySelector("svg path"), `${provider} should keep bundled vector geometry`);
+    if (!["huggingface", "notion", "doi"].includes(provider)) {
+      assert.equal(foreground, "#FFFFFF", `${provider} should use a white mark`);
+    }
+  }
+});
+
+test("pasting any safe bare HTTP URL into an empty Rich paragraph is one undo step", () => {
+  const url = "https://github.com/example/project/pull/7";
+  const { dom, editor } = setup();
+  assert.deepEqual(pasteText(editor, url), { handled: true, prevented: true });
+  assert.equal(editor.getMarkdown(), `[example/project · PR #7](${url})`);
+  assert.equal(dom.window.document.querySelectorAll("p.smart-link-block").length, 1);
+  assert.equal(editor.commands.undo(), true);
+  assert.equal(editor.getMarkdown(), "");
+
+  const inline = setup({ markdown: "Prefix ", revision: 1 });
+  inline.editor.commands.setTextSelection(inline.editor.state.doc.content.size - 1);
+  assert.equal(insertSmartLinkFromPaste(inline.editor.view, url), false);
+  assert.equal(inline.editor.getMarkdown(), "Prefix ");
+
+  const generic = setup();
+  assert.equal(insertSmartLinkFromPaste(generic.editor.view, "https://example.com/path"), true);
+  assert.equal(generic.editor.getMarkdown(), "[example.com](https://example.com/path)");
+  assert.equal(generic.editor.commands.undo(), true);
+  assert.equal(generic.editor.getMarkdown(), "");
+});
+
+test("every supported provider derives a local title while Source paste stays native", () => {
+  const examples = new Map([
+    ["https://support.apple.com/en-us/HT213650", "Apple 支持 · HT213650"],
+    ["https://github.com/example/project", "example/project"],
+    ["https://huggingface.co/Qwen/Qwen3-8B", "Qwen/Qwen3-8B"],
+    ["https://www.zhihu.com/question/123456", "知乎问题 #123456"],
+    ["https://www.xiaohongshu.com/explore/abc123", "小红书笔记"],
+    ["https://x.com/example/status/123", "@example · Post"],
+    ["https://arxiv.org/abs/2401.01234", "arXiv · 2401.01234"],
+    ["https://openreview.net/forum?id=abc123", "OpenReview · abc123"],
+    ["https://example.com/path", "example.com"]
+  ]);
+  for (const [url, expectedTitle] of examples) {
+    const pasted = setup();
+    assert.equal(insertSmartLinkFromPaste(pasted.editor.view, url), true);
+    assert.equal(pasted.editor.state.doc.textContent, expectedTitle);
+  }
+
+  const source = setup();
+  source.api.setEditorMode("source", { focus: false });
+  const sourceEditor = source.dom.window.document.querySelector(".source-editor");
+  const event = new source.dom.window.Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: { getData: () => "https://github.com/example/project" }
+  });
+  assert.equal(sourceEditor.dispatchEvent(event), true);
+  assert.equal(event.defaultPrevented, false);
+  assert.equal(source.editor.getMarkdown(), "");
+});
+
+test("smart-link paste keeps hostile URL delimiters parseable across Markdown round trips", () => {
+  for (const source of [
+    "https://github.com/example/project?value=)",
+    "https://github.com/example/project?value=(nested)",
+    "https://github.com/example/project?value=<tag>",
+    "https://github.com/example/project?value=\\path"
+  ]) {
+    const pasted = setup();
+    assert.equal(insertSmartLinkFromPaste(pasted.editor.view, source), true);
+    const markdown = pasted.editor.getMarkdown();
+    const href = pasted.dom.window.document.querySelector("a")?.getAttribute("href");
+    assert.ok(href);
+    assert.doesNotMatch(href, /[()<>\\]/u);
+
+    const reopened = setup({ markdown, revision: 1 });
+    assert.equal(
+      reopened.dom.window.document.querySelector("a")?.getAttribute("href"),
+      href
+    );
+    assert.equal(reopened.editor.getMarkdown(), markdown);
+  }
+});
+
+test("smart-link generated labels neutralize Markdown delimiters across reopen", () => {
+  for (const source of [
+    "https://github.com/%5Devil/repo",
+    "https://github.com/%2Aevil%2A/repo",
+    "https://github.com/%60evil%60/repo",
+    "https://github.com/%5Cevil/repo",
+    "https://github.com/%7E%7Eevil%7E%7E/repo",
+    "https://github.com/%7Cevil/repo",
+    "https://github.com/%5Eevil%5E/repo",
+    "https://github.com/%24evil%24/repo"
+  ]) {
+    const pasted = setup();
+    assert.equal(insertSmartLinkFromPaste(pasted.editor.view, source), true);
+    const markdown = pasted.editor.getMarkdown();
+    const title = pasted.editor.state.doc.textContent;
+    assert.doesNotMatch(title, /[\\[\]*_`~|^$]/u);
+
+    const reopened = setup({ markdown, revision: 1 });
+    assert.equal(reopened.editor.state.doc.textContent, title);
+    assert.equal(reopened.editor.getMarkdown(), markdown);
+    assert.equal(reopened.dom.window.document.querySelectorAll("p.smart-link-block").length, 1);
+  }
 });
 
 test("slash plugin menu inserts YouTube and converts supported URLs", () => {
-  assert.deepEqual(rendererPluginRegistry.map((plugin) => plugin.id), ["youtube"]);
+  assert.deepEqual(rendererPluginRegistry.map((plugin) => plugin.id), ["youtube", "table", "tag"]);
   const expectedID = "dQw4w9WgXcQ";
   for (const source of [
     `https://www.youtube.com/watch?v=${expectedID}`,
@@ -649,6 +1474,181 @@ test("slash plugin menu inserts YouTube and converts supported URLs", () => {
   invalid.editor.commands.insertContent("/youtube https://example.com/nope");
   assert.equal(invalid.editor.state.doc.firstChild.type.name, "paragraph");
   assert.match(invalid.editor.getText(), /^\/youtube/);
+});
+
+test("native slash command panel mirrors selection and safely chooses a command", () => {
+  const { dom, api, editor, messages } = setup({}, { nativeSlashCommandPanel: true });
+  typeText(editor, "/");
+
+  const menu = dom.window.document.querySelector(".slash-plugin-menu");
+  const opened = messages.filter((message) => (
+    message.type === "slashCommandMenuChanged" && message.visible === true
+  )).at(-1);
+  assert.ok(opened);
+  assert.equal(menu.hidden, true);
+  assert.equal(opened.cardID, "card-one");
+  assert.deepEqual(opened.items.map((item) => item.id), ["youtube", "table", "tag"]);
+  assert.equal(opened.selectedIndex, 0);
+  assert.ok(Number.isFinite(opened.anchor.left));
+  assert.ok(Number.isFinite(opened.anchor.top));
+  assert.ok(Number.isFinite(opened.anchor.bottom));
+
+  const originalCoordsAtPos = editor.view.coordsAtPos.bind(editor.view);
+  editor.view.coordsAtPos = () => ({ left: 28, right: 28, top: -40, bottom: -20 });
+  dom.window.document.querySelector("#renderer").dispatchEvent(new dom.window.Event("scroll"));
+  const scrolledAbove = messages.filter((message) => (
+    message.type === "slashCommandMenuChanged" && message.visible === true
+  )).at(-1);
+  assert.equal(scrolledAbove.anchor.top, -40);
+  assert.equal(scrolledAbove.anchor.bottom, -20);
+  editor.view.coordsAtPos = originalCoordsAtPos;
+  dom.window.document.querySelector("#renderer").dispatchEvent(new dom.window.Event("scroll"));
+
+  assert.equal(api.dismissSlashCommandMenu(), true);
+  assert.equal(
+    messages.filter((message) => message.type === "slashCommandMenuChanged").at(-1).visible,
+    false
+  );
+  assert.equal(pressKey(editor, "ArrowDown"), false);
+  assert.equal(api.focusEditor(), true);
+  assert.equal(
+    messages.filter((message) => message.type === "slashCommandMenuChanged").at(-1).visible,
+    true
+  );
+
+  assert.equal(pressKey(editor, "ArrowDown"), true);
+  const moved = messages.filter((message) => (
+    message.type === "slashCommandMenuChanged" && message.visible === true
+  )).at(-1);
+  assert.equal(moved.selectedIndex, 1);
+  assert.equal(api.chooseSlashCommand("tag"), true);
+  assert.equal(editor.getText(), "/tag ");
+  assert.equal(
+    messages.filter((message) => message.type === "slashCommandMenuChanged").at(-1).visible,
+    false
+  );
+
+  const escaped = setup({}, { nativeSlashCommandPanel: true });
+  typeText(escaped.editor, "/");
+  assert.equal(pressKey(escaped.editor, "Escape"), true);
+  assert.equal(
+    escaped.messages.filter(
+      (message) => message.type === "slashCommandMenuChanged"
+    ).at(-1).visible,
+    false
+  );
+});
+
+test("top-level tag commands submit one atomic metadata message and stay out of Markdown", () => {
+  const { api, editor, messages } = setup({
+    markdown: "Before\n\n/tag   Transformer   Reading\n\nAfter",
+    revision: 8
+  });
+  let commandEnd = null;
+  editor.state.doc.descendants((node, position) => {
+    if (node.type.name === "paragraph" && node.textContent.startsWith("/tag")) {
+      commandEnd = position + node.nodeSize - 1;
+    }
+  });
+  assert.notEqual(commandEnd, null);
+  editor.commands.setTextSelection(commandEnd);
+
+  const messageCount = messages.length;
+  assert.equal(pressKey(editor, "Enter"), true);
+  const transactionMessages = messages.slice(messageCount).filter(
+    (message) => ["markdownChanged", "tagCommandSubmitted"].includes(message.type)
+  );
+
+  assert.deepEqual(transactionMessages, [{
+    type: "tagCommandSubmitted",
+    cardID: "card-one",
+    tagName: "Transformer Reading",
+    markdown: "Before\n\nAfter",
+    revision: 9
+  }]);
+  assert.equal(api.getState().markdown, "Before\n\nAfter");
+  assert.equal(editor.state.selection.$from.parent.textContent, "After");
+  assert.equal(api.getMarkdownExportBundle().markdown, "Before\n\nAfter");
+  assert.equal(
+    api.getMarkdownForCopy("file:///tmp/markdown-card-attachments/"),
+    "Before\n\nAfter"
+  );
+});
+
+test("tag slash entry is top-level only and Tag names are validated before submission", () => {
+  assert.equal(normalizeTagCommandName("  阅读   笔记  "), "阅读 笔记");
+  assert.equal(normalizeTagCommandName("x".repeat(65)), null);
+  assert.equal(normalizeTagCommandName("bad\u0000tag"), null);
+
+  const topLevel = setup();
+  typeText(topLevel.editor, "/tag");
+  const menu = topLevel.dom.window.document.querySelector(".slash-plugin-menu");
+  assert.equal(menu.hidden, false);
+  assert.match(menu.textContent, /Tag/);
+  assert.equal(pressKey(topLevel.editor, "Enter"), true);
+  assert.equal(topLevel.editor.getText(), "/tag ");
+
+  const nested = setup({ markdown: "- /" });
+  nested.editor.commands.focus("end");
+  const nestedMenu = nested.dom.window.document.querySelector(".slash-plugin-menu");
+  assert.doesNotMatch(nestedMenu.textContent, /Tag/);
+
+  const command = setup({ markdown: "- /tag Nested", revision: 2 });
+  command.editor.commands.focus("end");
+  const before = command.messages.length;
+  pressKey(command.editor, "Enter");
+  assert.equal(
+    command.messages.slice(before).some((message) => message.type === "tagCommandSubmitted"),
+    false
+  );
+  assert.match(command.editor.getMarkdown(), /\/tag Nested/);
+
+  const multiline = setup({ markdown: "/tag First  \nSecond", revision: 3 });
+  multiline.editor.commands.focus("end");
+  const multilineBefore = multiline.messages.length;
+  pressKey(multiline.editor, "Enter");
+  assert.equal(
+    multiline.messages.slice(multilineBefore).some(
+      (message) => message.type === "tagCommandSubmitted"
+    ),
+    false
+  );
+});
+
+test("IME Enter never submits a tag command until composition has ended", () => {
+  const composing = setup({ markdown: "/tag 中文系列", revision: 4 });
+  composing.editor.commands.focus("end");
+  const before = composing.messages.length;
+
+  pressKey(composing.editor, "Enter", { isComposing: true });
+  assert.equal(
+    composing.messages.slice(before).some((message) => message.type === "tagCommandSubmitted"),
+    false
+  );
+
+  const completed = setup({ markdown: "/tag 中文系列", revision: 4 });
+  completed.editor.commands.focus("end");
+  assert.equal(pressKey(completed.editor, "Enter"), true);
+  assert.deepEqual(completed.messages.at(-1), {
+    type: "tagCommandSubmitted",
+    cardID: "card-one",
+    tagName: "中文系列",
+    markdown: "",
+    revision: 5
+  });
+});
+
+test("Undo never restores an already-submitted tag command into Markdown", () => {
+  const { editor, api } = setup({ markdown: "Body", revision: 1 });
+  editor.commands.focus("end");
+  pressKey(editor, "Enter");
+  typeText(editor, "/tag Research");
+  assert.equal(pressKey(editor, "Enter"), true);
+  assert.equal(api.getState().markdown, "Body");
+
+  editor.commands.undo();
+  assert.equal(api.getState().markdown, "Body");
+  assert.doesNotMatch(editor.getMarkdown(), /\/tag Research/);
 });
 
 test("standalone YouTube URLs paste or finish on Enter as rich covers", () => {
@@ -739,11 +1739,39 @@ test("paragraph Enter and automatic wrapping share one body line height", async 
   const paragraphRule = css.match(/(?:^|\n)p\s*\{([\s\S]*?)\}/)?.[1] ?? "";
 
   assert.equal(paragraphs.length, 2);
-  assert.match(css, /--body-line-height:\s*1\.58/);
+  assert.match(css, /--body-line-height:\s*1\.5/);
+  assert.match(css, /--block-gap:\s*10px/);
   assert.match(css, /p,[\s\S]*?line-height:\s*var\(--body-line-height\)/);
   assert.match(paragraphRule, /margin:\s*0/);
   assert.doesNotMatch(css, /p\s*\+\s*p(?![\w.-])[\s\S]*?margin/);
-  assert.match(css, /p\s*\+\s*ul,[\s\S]*?margin-top:\s*15px/);
+  assert.match(css, /p\s*\+\s*ul,[\s\S]*?margin-top:\s*var\(--block-gap\)/);
+});
+
+test("Enter-created task rows and adjacent task-list blocks share one row gap", async () => {
+  const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+  const entered = setup({ markdown: "- [ ] first" });
+  entered.editor.commands.focus("end");
+  assert.equal(pressKey(entered.editor, "Enter"), true);
+  typeText(entered.editor, "second");
+  assert.equal(entered.dom.window.document.querySelectorAll('ul[data-type="taskList"]').length, 1);
+  assert.equal(entered.dom.window.document.querySelectorAll('ul[data-type="taskList"] > li').length, 2);
+
+  const separate = setup({ markdown: "- [ ] first\n\n- [ ] second" });
+  assert.equal(separate.dom.window.document.querySelectorAll('ul[data-type="taskList"]').length, 2);
+
+  assert.match(css, /--task-row-gap:\s*0px/);
+  assert.match(
+    css,
+    /ul\[data-type="taskList"\]\s*>\s*li\s*\+\s*li\s*\{[\s\S]*?margin-top:\s*var\(--task-row-gap\)/
+  );
+  assert.match(
+    css,
+    /ul\[data-type="taskList"\]:has\(\+\s*ul\[data-type="taskList"\]\)\s*\{[\s\S]*?margin-bottom:\s*var\(--task-row-gap\)/
+  );
+  assert.match(
+    css,
+    /ul\[data-type="taskList"\]\s*\+\s*ul\[data-type="taskList"\]\s*\{[\s\S]*?margin-top:\s*var\(--task-row-gap\)/
+  );
 });
 
 test("nested list rows do not inherit top-level block gaps", async () => {
@@ -751,9 +1779,36 @@ test("nested list rows do not inherit top-level block gaps", async () => {
   const nestedListRule = css.match(/li\s*>\s*ul,[\s\S]*?li\s*>\s*ol\s*\{([\s\S]*?)\}/)?.[1] ?? "";
   const adjacentItemRule = css.match(/li\s*\+\s*li\s*\{([\s\S]*?)\}/)?.[1] ?? "";
 
-  assert.match(css, /\.markdown-canvas\s*>\s*ul,[\s\S]*?margin-bottom:\s*15px/);
+  assert.match(
+    css,
+    /\.markdown-canvas\s*>\s*ul,[\s\S]*?margin-bottom:\s*var\(--block-gap\)/
+  );
   assert.match(nestedListRule, /margin:\s*0/);
   assert.match(adjacentItemRule, /margin-top:\s*0/);
+});
+
+test("headings, media, math, and code share a compact vertical rhythm", async () => {
+  const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+  const headingRule = css.match(/h1,[\s\S]*?h6\s*\{([\s\S]*?)\}/)?.[1] ?? "";
+  const imageRule = css.match(/\.local-attachment\s*\{([\s\S]*?)\}/)?.[1] ?? "";
+  const youtubeRule = css.match(/\.youtube-card\s*\{([\s\S]*?)\}/)?.[1] ?? "";
+  const mathRules = [...css.matchAll(/\.math-node-block\s*\{([\s\S]*?)\}/g)];
+  const mathRule = mathRules.at(-1)?.[1] ?? "";
+  const preRule = css.match(/(?:^|\n)pre\s*\{([\s\S]*?)\}/)?.[1] ?? "";
+  const blockMarginRule = css.match(
+    /blockquote,\s*table,\s*pre,\s*\.math-node-block\s*\{([\s\S]*?)\}/
+  )?.[1] ?? "";
+
+  assert.match(headingRule, /margin:\s*1\.1em 0 0\.4em/);
+  assert.match(imageRule, /display:\s*inline-block/);
+  assert.match(imageRule, /margin:\s*4px 0 var\(--block-gap\)/);
+  assert.match(imageRule, /vertical-align:\s*top/);
+  assert.match(youtubeRule, /margin:\s*4px 0 var\(--block-gap\)/);
+  assert.match(mathRule, /padding:\s*2px 0 4px/);
+  assert.match(preRule, /padding:\s*12px 16px/);
+  assert.match(preRule, /line-height:\s*var\(--body-line-height\)/);
+  assert.match(blockMarginRule, /margin:\s*0/);
+  assert.match(css, /\.ProseMirror-selectednode\s*\{[\s\S]*?outline:\s*1px solid var\(--focus\)/);
 });
 
 test("clipboard images become managed local attachments and keep Markdown copy serializable", async () => {
@@ -777,6 +1832,46 @@ test("clipboard images become managed local attachments and keep Markdown copy s
   assert.ok(image);
   assert.equal(image.getAttribute("src"), `mdcard-asset://attachment/${attachmentID}.png`);
   assert.match(editor.getMarkdown(), /!\[Screenshot\]\(attachments\/34d1880c-35d5-4c7e-9620-40c3140b003c\.png\)/);
+});
+
+test("caret deletion selects adjacent media before an explicit keyboard deletion", () => {
+  const attachmentID = "34d1880c-35d5-4c7e-9620-40c3140b003c";
+  const source = `![Screenshot](attachments/${attachmentID}.png)`;
+  const backward = setup({ markdown: source });
+  let imagePosition = null;
+  backward.editor.state.doc.descendants((node, position) => {
+    if (node.type.name === "blockedImage") imagePosition = position;
+  });
+  assert.notEqual(imagePosition, null);
+  backward.editor.commands.setTextSelection(imagePosition + 1);
+
+  assert.equal(pressKey(backward.editor, "Backspace"), true);
+  assert.equal(backward.editor.state.selection.constructor.name, "NodeSelection");
+  assert.equal(pressKey(backward.editor, "Backspace", { repeat: true }), true);
+  assert.equal(backward.editor.getMarkdown(), source);
+  assert.ok(backward.dom.window.document.querySelector("img.local-attachment"));
+  assert.equal(pressKey(backward.editor, "Backspace"), true);
+  assert.equal(backward.editor.getMarkdown(), "");
+
+  const forward = setup({ markdown: source });
+  let forwardImagePosition = null;
+  forward.editor.state.doc.descendants((node, position) => {
+    if (node.type.name === "blockedImage") forwardImagePosition = position;
+  });
+  forward.editor.commands.setTextSelection(forwardImagePosition);
+  assert.equal(pressKey(forward.editor, "Delete"), true);
+  assert.equal(forward.editor.state.selection.constructor.name, "NodeSelection");
+  assert.equal(pressKey(forward.editor, "Delete", { repeat: true }), true);
+  assert.equal(forward.editor.getMarkdown(), source);
+
+  assert.equal(pressKey(forward.editor, "Delete"), true);
+  assert.equal(forward.dom.window.document.querySelector("img.local-attachment"), null);
+  assert.equal(forward.editor.getMarkdown(), "");
+  forward.api.flushMarkdownChanges();
+  assert.deepEqual(
+    forward.messages.filter((message) => message.type === "managedAttachmentsChanged").at(-1),
+    { type: "managedAttachmentsChanged", cardID: "card-one", attachmentIDs: [] }
+  );
 });
 
 test("Markdown copy expands only managed attachments to absolute file URLs without editing the card", () => {
@@ -858,8 +1953,14 @@ test("theme tokens keep the UI grayscale while code uses VS Code Light+ and Dark
   assert.match(css, /\.hljs-string[\s\S]*var\(--syntax-string\)/);
   assert.match(css, /\.hljs-comment[\s\S]*var\(--syntax-comment\)/);
   assert.doesNotMatch(css, /gradient\s*\(/i);
-  assert.doesNotMatch(css, /\.editor-block|\.source-editor|\.source-fallback/);
-  assert.doesNotMatch(css, /Write Markdown|data-placeholder/);
+  assert.doesNotMatch(css, /\.editor-block|\.source-fallback/);
+  assert.match(css, /\.source-editor\s*\{[\s\S]*font-family:/);
+  assert.doesNotMatch(css, /Write Markdown/i);
+  const placeholder = css.match(
+    /\.markdown-canvas\s+p\.is-editor-empty:first-child::before\s*\{([\s\S]*?)\}/
+  )?.[1] ?? "";
+  assert.match(placeholder, /content:\s*attr\(data-placeholder\)/);
+  assert.match(placeholder, /pointer-events:\s*none/);
   const h2Block = css.match(/h2\s*\{([\s\S]*?)\}/)?.[1] ?? "";
   assert.doesNotMatch(h2Block, /border-bottom|padding-bottom/);
   const blockMath = css.match(/\.math-node-block\s*\{([\s\S]*?)\}/)?.[1] ?? "";
@@ -891,6 +1992,16 @@ test("body text keeps WCAG AA contrast in both appearances", async () => {
     assert.ok(contrast(token(block, "text-primary"), background) >= 4.5, `${name} primary contrast`);
     assert.ok(contrast(token(block, "text-secondary"), background) >= 4.5, `${name} secondary contrast`);
   }
+});
+
+test("tagged cards keep a compact header-to-first-block rhythm", async () => {
+  const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+  const rendererBlock = css.match(/#renderer\s*\{([\s\S]*?)\}/)?.[1] ?? "";
+  const compactBlock = css.match(
+    /@media\s*\(max-width:\s*620px\)\s*\{[\s\S]*?#renderer\s*\{([\s\S]*?)\}/
+  )?.[1] ?? "";
+  assert.match(rendererBlock, /padding:\s*6px 40px 42px/);
+  assert.match(compactBlock, /padding:\s*6px 28px 24px/);
 });
 
 test("production shell permits only native-scheme images and forbids web network and frames", async () => {

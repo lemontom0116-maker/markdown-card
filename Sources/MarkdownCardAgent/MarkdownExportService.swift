@@ -132,7 +132,9 @@ final class MarkdownExportService {
         guard savePanel == nil else { return }
         let panel = NSSavePanel()
         panel.title = "Export Markdown"
-        panel.message = "Save the Markdown file beside its managed attachments."
+        panel.message = bundle.attachmentIDs.isEmpty
+            ? "Save the Markdown file."
+            : "Save the Markdown file beside its managed attachments."
         panel.prompt = "Export"
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false

@@ -14,7 +14,7 @@ final class AgentCommandServerTests: XCTestCase {
         let payload = Data(
             """
             {
-              "protocolVersion": 3,
+              "protocolVersion": 5,
               "requestID": "\(requestID.uuidString)",
               "command": { "type": "future-command" }
             }
@@ -36,8 +36,8 @@ final class AgentCommandServerTests: XCTestCase {
         XCTAssertEqual(response.error?.code, "invalid_request")
     }
 
-    func testProtocolV2ReturnsExplicitUpgradeError() throws {
-        let request = AgentRequest(protocolVersion: 2, command: .quit)
+    func testProtocolV4ReturnsExplicitUpgradeError() throws {
+        let request = AgentRequest(protocolVersion: 4, command: .quit)
         let response = try exchange(payload: JSONEncoder().encode(request))
 
         XCTAssertFalse(response.ok)
