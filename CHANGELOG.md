@@ -60,6 +60,10 @@ All notable changes to Markdown Card are documented here.
 - Unified Home, Card Library, and Settings inside one Raycast-inspired Command
   Center workspace with route-specific search, a directly editable Library,
   card information, stable deep-route sizing, and keyboard-first navigation.
+- Fixed a hidden Library or Settings workspace reappearing when a floating card
+  reactivated the accessory app. Deep routes now hide explicitly on app
+  deactivation while preserving their route and only return through an explicit
+  Command Center, Library, or Settings action.
 - Removed the Full Screen card layout and migrated existing Full Screen cards to
   centered Middle Notes without changing their Markdown or metadata. Markdown
   Card now remains an accessory agent in Home, Library, Settings, and every

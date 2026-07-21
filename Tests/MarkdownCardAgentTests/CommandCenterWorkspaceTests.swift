@@ -266,6 +266,75 @@ final class CommandCenterWorkspaceTests: XCTestCase {
         controller.close(animated: false)
     }
 
+    func testApplicationDeactivationHidesWorkspaceWithoutRestoringItOnCardActivation() throws {
+        let suiteName = "CommandCenterWorkspaceApplicationDeactivation.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let controller = CommandCenterWindowController(
+            appearanceController: AppearanceController(defaults: defaults),
+            defaults: defaults,
+            accessibilityPreferencesProvider: {
+                .init(reduceTransparency: false, increaseContrast: false, reduceMotion: true)
+            }
+        )
+        controller.show(route: .library, cards: [], on: nil)
+        let host = try XCTUnwrap(controller.window)
+
+        XCTAssertTrue(host.isVisible)
+        XCTAssertFalse(
+            host.hidesOnDeactivate,
+            "AppKit must not automatically restore Library when a floating card activates the app"
+        )
+
+        controller.hideForApplicationDeactivation()
+        XCTAssertEqual(controller.activeRoute, .library)
+        XCTAssertFalse(host.isVisible)
+        XCTAssertFalse(controller.isClosingForTesting())
+
+        NSApp.activate(ignoringOtherApps: true)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertFalse(
+            host.isVisible,
+            "Card activation must not revive a workspace hidden during app deactivation"
+        )
+
+        controller.show(route: .library, cards: [], on: nil)
+        XCTAssertEqual(controller.activeRoute, .library)
+        XCTAssertTrue(host.isVisible, "Only an explicit Library action should restore the workspace")
+        controller.close(animated: false)
+    }
+
+    func testApplicationDeactivationDoesNotHideWorkspaceWithAttachedSheet() throws {
+        let suiteName = "CommandCenterWorkspaceSheetDeactivation.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let controller = CommandCenterWindowController(
+            appearanceController: AppearanceController(defaults: defaults),
+            defaults: defaults,
+            accessibilityPreferencesProvider: {
+                .init(reduceTransparency: false, increaseContrast: false, reduceMotion: true)
+            }
+        )
+        controller.show(route: .settings(nil), cards: [], on: nil)
+        let host = try XCTUnwrap(controller.window)
+        let sheet = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        host.beginSheet(sheet)
+
+        controller.hideForApplicationDeactivation()
+        XCTAssertEqual(controller.activeRoute, .settings(nil))
+        XCTAssertTrue(host.isVisible)
+
+        host.endSheet(sheet)
+        controller.hideForApplicationDeactivation()
+        XCTAssertEqual(controller.activeRoute, .settings(nil))
+        XCTAssertFalse(host.isVisible)
+    }
+
     func testEmbeddedLibraryGroupsWithoutReorderingAndPublishesInformation() throws {
         let suiteName = "CommandCenterWorkspaceLibrary.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

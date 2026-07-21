@@ -112,6 +112,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationDidResignActive(_ notification: Notification) {
+        applicationController?.hideCommandCenterForApplicationDeactivation()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if flag { return true }
         if controllerHasStarted {

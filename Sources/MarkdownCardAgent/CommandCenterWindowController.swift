@@ -764,7 +764,13 @@ final class CommandCenterWindowController: NSWindowController, NSTableViewDataSo
                 height: CGFloat.greatestFiniteMagnitude
             )
             panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-            panel.hidesOnDeactivate = true
+            // AppKit automatically restores a window whose
+            // `hidesOnDeactivate` flag is set when this accessory app becomes
+            // active again. Clicking a floating card would therefore revive a
+            // previously hidden Library or Settings workspace. Deep routes are
+            // hidden explicitly from `hideForApplicationDeactivation()` so
+            // their state survives without making them follow card focus.
+            panel.hidesOnDeactivate = false
         } else {
             panel.styleMask.remove(.resizable)
             panel.minSize = constrainedMinimum
@@ -844,6 +850,32 @@ final class CommandCenterWindowController: NSWindowController, NSTableViewDataSo
             timing: .easeIn
         )
         perform(#selector(finishAnimatedClose), with: nil, afterDelay: motion.closingDuration)
+    }
+
+    func hideForApplicationDeactivation() {
+        guard activeRoute.isWorkspace,
+              let panel = window,
+              panel.isVisible,
+              panel.attachedSheet == nil
+        else { return }
+
+        routeTransitionState.invalidate()
+        NSObject.cancelPreviousPerformRequests(
+            withTarget: self,
+            selector: #selector(finishAnimatedClose),
+            object: nil
+        )
+        isClosing = false
+        saveQuery(searchField.stringValue, for: activeRoute)
+        switch activeRoute {
+        case .library:
+            libraryController?.routeDidDeactivate()
+        case .settings:
+            settingsController?.routeDidDeactivate()
+        case .home:
+            return
+        }
+        panel.orderOut(nil)
     }
 
     func apply(resolvedAppearance: ResolvedAppearance) {

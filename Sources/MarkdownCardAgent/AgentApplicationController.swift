@@ -287,6 +287,10 @@ final class AgentApplicationController: NSObject, AppearanceConsumer, NSMenuItem
         commandCenterWindowController?.show(cards: persistentCardsSnapshot(), on: currentScreen())
     }
 
+    func hideCommandCenterForApplicationDeactivation() {
+        commandCenterWindowController?.hideForApplicationDeactivation()
+    }
+
     func handleSystemSleepEvent(_ event: SystemSleepEventMonitor.Event) {
         switch event {
         case .sessionDidResignActive:
